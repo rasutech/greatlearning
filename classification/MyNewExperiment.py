@@ -1,31 +1,48 @@
 import ipywidgets as widgets
-from IPython.display import display
+from IPython.display import display, clear_output
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-def plot_ticket_counts_by_app(app_id):
+def plot_ticket_counts_by_app(app_name):
     """Plot ticket counts for the selected application."""
-    data_filtered = df[df['app_id'] == app_id]
-    plt.figure(figsize=(10, 6))
+    data_filtered = df[df['app_name'] == app_name]
     sns.countplot(data=data_filtered, x='priority')
-    plt.title(f'Ticket Counts by Priority for Application {app_id}')
+    plt.title(f'Ticket Counts by Priority for {app_name}')
     plt.xticks(rotation=45)
     plt.ylabel('Ticket Count')
-    plt.show()
 
-def plot_ticket_count_by_priority_and_month(app_id):
+def plot_ticket_count_by_priority_and_month(app_name):
     """Plot ticket count by priority in the selected application across months."""
-    data_filtered = df[df['app_id'] == app_id]
-    plt.figure(figsize=(14, 8))
+    data_filtered = df[df['app_name'] == app_name]
     sns.catplot(data=data_filtered, x='year_month', hue='priority', kind='count', height=4, aspect=2)
-    plt.title(f'Ticket Count by Priority in {app_id} by Month')
+    plt.title(f'Ticket Count by Priority in {app_name} by Month')
     plt.xticks(rotation=45)
     plt.subplots_adjust(hspace=0.4)
-    plt.show()
 
-# Creating a Dropdown menu for app_id selection
-app_ids = df['app_id'].unique()
-dropdown_app_id = widgets.Dropdown(options=app_ids, description='Select App ID:')
+# Creating a Dropdown menu for app_name selection
+app_names = df['app_name'].unique()
+dropdown_app_name = widgets.Dropdown(options=app_names, description='Select Application:')
+
+output = widgets.Output()
+
+# Widget to display visualizations based on the selected app_name
+def update_plots(change):
+    with output:
+        clear_output(wait=True)  # Clear the output area before displaying the new plot
+        plt.figure(figsize=(10, 6))  # Adjust the figure size as needed
+        plot_ticket_counts_by_app(change.new)
+        plt.show()
+        
+        plt.figure(figsize=(14, 8))  # Adjust the figure size as needed for the second plot
+        plot_ticket_count_by_priority_and_month(change.new)
+        plt.show()
+
+# Linking the dropdown to the update function
+dropdown_app_name.observe(update_plots, names='value')
+
+# Display the dropdown and output area
+display(dropdown_app_name, output)
+
 
 # Widget to display visualizations based on the selected app_id
 def update_plots(change):
