@@ -3,6 +3,71 @@ from IPython.display import display, clear_output
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+# Unique values for app_name and assignment_group
+app_names = df['app_name'].unique()
+assignment_groups = df['assignment_group'].unique()
+# Assuming 'priority' is a column in your DataFrame
+priorities = df['priority'].unique()
+
+# Create dropdown for priority
+dropdown_priority = widgets.Dropdown(options=priorities, description='Select Priority:')
+
+# Create dropdowns
+dropdown_app_name = widgets.Dropdown(options=app_names, description='Select Application:')
+dropdown_assignment_group = widgets.Dropdown(options=assignment_groups, description='Select Assignment Group:')
+
+output = widgets.Output()
+
+def update_assignment_group_dropdown(*args):
+    app_name_selected = dropdown_app_name.value
+    filtered_groups = df[df['app_name'] == app_name_selected]['assignment_group'].unique()
+    dropdown_assignment_group.options = filtered_groups
+
+# Call the update function whenever the app_name selection changes
+dropdown_app_name.observe(update_assignment_group_dropdown, 'value')
+
+def plot_data(app_name, assignment_group, priority):
+    with output:
+        clear_output(wait=True)
+        # Filter data based on selections
+        filtered_df = df[(df['app_name'] == app_name) & 
+                         (df['assignment_group'] == assignment_group) & 
+                         (df['priority'] == priority)]
+        
+        # Plot 1: Trending of Ticket Counts
+        plt.figure(figsize=(10, 6))
+        sns.countplot(data=filtered_df, x='month')
+        plt.title(f'Ticket Counts by Month for {app_name}, {assignment_group}, Priority: {priority}')
+        plt.xlabel('Month')
+        plt.ylabel('Ticket Count')
+        plt.xticks(rotation=45)
+        plt.show()
+        
+        # Plot 2: Stacked Bar of Time-to-Resolve Bins
+        grouped_data = filtered_df.groupby(['month', 'resolution_time_bucket']).size().unstack(fill_value=0)
+        grouped_data.plot(kind='bar', stacked=True, figsize=(10, 6))
+        plt.title(f'Resolution Time Buckets for {app_name}, {assignment_group}, Priority: {priority}')
+        plt.xlabel('Month')
+        plt.ylabel('Number of Tickets')
+        plt.xticks(rotation=45)
+        plt.legend(title='Resolution Time Bucket')
+        plt.tight_layout()
+        plt.show()
+
+def update_plot(*args):
+    plot_data(dropdown_app_name.value, dropdown_assignment_group.value, dropdown_priority.value)
+
+# Observing changes
+dropdown_app_name.observe(update_plot, 'value')
+dropdown_assignment_group.observe(update_plot, 'value')
+
+display(dropdown_app_name, dropdown_assignment_group, output)
+update_plot()  # Initial call to display the plot
+
+display(dropdown_app_name, dropdown_assignment_group, dropdown_priority, output)
+update_plot()  # Initial call to display the plots
+
+
 def plot_ticket_counts_by_app(app_name):
     """Plot ticket counts for the selected application."""
     data_filtered = df[df['app_name'] == app_name]
@@ -50,8 +115,12 @@ def update_plots(change):
     plot_ticket_counts_by_app(change.new)
     plot_ticket_count_by_priority_and_month(change.new)
 
+def update_plot(*args):
+    plot_data(dropdown_app_name.value, dropdown_assignment_group.value, dropdown_priority.value)
+
 # Linking the dropdown to the update function
 dropdown_app_id.observe(update_plots, names='value')
+dropdown_priority.observe(update_plot, 'value')
 
 # Display the dropdown
 display(dropdown_app_id)
