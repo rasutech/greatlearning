@@ -1,13 +1,21 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# ... (rest of the code remains the same until the plotting sections)
+# Read the DataFrame (replace 'data.csv' with your actual file path if needed)
+df = pd.read_csv('data.csv')
+
+# Preprocessing
+df['received_dt'] = pd.to_datetime(df['received_dt'])
+df['completed_dt'] = pd.to_datetime(df['completed_dt'])
+df['received_month'] = df['received_dt'].dt.to_period('M')
+df['completed_month'] = df['completed_dt'].dt.to_period('M')
 
 # 1. Volumetric Throughput by Received Month with Count Labels
+received_counts = df['received_month'].value_counts().sort_index()
+
 plt.figure(figsize=(10, 6))
 bars = received_counts.plot(kind='bar', color='skyblue', label='Received')
 
-# Add count labels
 for bar in bars.patches:
     plt.annotate(format(bar.get_height(), '.0f'), 
                  (bar.get_x() + bar.get_width() / 2, bar.get_height()), 
@@ -20,10 +28,11 @@ plt.legend()
 plt.show()
 
 # 2. Volumetric Throughput by Completed Month with Count Labels
+completed_counts = df[df['completed_dt'].notnull()]['completed_month'].value_counts().sort_index()
+
 plt.figure(figsize=(10, 6))
 bars = completed_counts.plot(kind='bar', color='green', label='Completed')
 
-# Add count labels
 for bar in bars.patches:
     plt.annotate(format(bar.get_height(), '.0f'), 
                  (bar.get_x() + bar.get_width() / 2, bar.get_height()), 
@@ -36,10 +45,12 @@ plt.legend()
 plt.show()
 
 # 3. Combined Bar Chart with Count Labels
+combined_counts = pd.concat([received_counts, completed_counts], axis=1)
+combined_counts.columns = ['Received', 'Completed']
+
 plt.figure(figsize=(10, 6))
 bars = combined_counts.plot(kind='bar', rot=0)
 
-# Add count labels for each bar group
 for bar_group in bars.containers:
     for bar in bar_group:
         plt.annotate(format(bar.get_height(), '.0f'), 
@@ -52,17 +63,44 @@ plt.ylabel('Number of Orders')
 plt.legend()
 plt.show()
 
-# 4. Stacked Bar Chart with Count Labels
+# 4. Stacked Bar Chart by Order Type and Order Category with Improved Labels
 def plot_stacked_bar(category):
-    # ... (rest of the function remains the same)
+    filtered_df = df[df['order_category'] == category]
+    pivot_df = filtered_df.pivot_table(index='received_month', columns='order_type', aggfunc='size', fill_value=0)
+    
+    plt.figure(figsize=(10, 6))
+    bars = pivot_df.plot(kind='bar', stacked=True, rot=0)
 
-    # Add count labels for each segment in the stacked bar
+    # Add count labels with adjustments
     for bar_group in bars.containers:
         for bar in bar_group:
-            plt.annotate(format(bar.get_height(), '.0f'), 
-                         (bar.get_x() + bar.get_width() / 2, bar.get_y() + bar.get_height() / 2), 
-                         ha='center', va='center')
+            height = bar.get_height()
+            label_text = format(height, '.0f')
 
-    # ... (rest of the function remains the same)
+            if height > 10:  # Example threshold
+                plt.annotate(label_text, 
+                             (bar.get_x() + bar.get_width() / 2, bar.get_y() + bar.get_height() / 2), 
+                             ha='center', va='center',
+                             xytext=(0, 5),  # Vertical offset
+                             textcoords='offset points',
+                             rotation=45,  # Rotate labels if needed
+                             fontsize=8)  # Adjust font size as needed
 
-# ... (rest of the code remains the same)
+    plt.title(f'Stacked Bar Chart by Order Type for {category}')
+    plt.xlabel('Month')
+    plt.ylabel('Number of Orders')
+    plt.legend()
+    plt.show()
+
+# Example usage
+plot_stacked_bar('Category A') 
+
+# 5. Dynamic Plotting (requires ipywidgets)
+from ipywidgets import interact, Dropdown
+
+categories = df['order_category'].unique()
+category_dropdown = Dropdown(options=categories, description='Order Category:')
+
+@interact(category=category_dropdown)
+def update_plot(category):
+    plot_stacked_bar(category)
