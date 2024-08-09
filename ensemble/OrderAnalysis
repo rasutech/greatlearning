@@ -1,106 +1,124 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# Read the DataFrame (replace 'data.csv' with your actual file path if needed)
-df = pd.read_csv('data.csv')
+# ... (rest of the code remains the same until the plotting sections)
 
-# Preprocessing
-df['received_dt'] = pd.to_datetime(df['received_dt'])
-df['completed_dt'] = pd.to_datetime(df['completed_dt'])
-df['received_month'] = df['received_dt'].dt.to_period('M')
-df['completed_month'] = df['completed_dt'].dt.to_period('M')
+# 1. Volumetric Throughput by Received Month with Table View
+plt.figure(figsize=(10, 8))  # Adjust figure size to accommodate the table
 
-# 1. Volumetric Throughput by Received Month with Count Labels
-received_counts = df['received_month'].value_counts().sort_index()
+# Bar chart
+ax = received_counts.plot(kind='bar', color='skyblue', label='Received')
 
-plt.figure(figsize=(10, 6))
-bars = received_counts.plot(kind='bar', color='skyblue', label='Received')
-
-for bar in bars.patches:
+# Add count labels
+for bar in ax.patches:
     plt.annotate(format(bar.get_height(), '.0f'), 
                  (bar.get_x() + bar.get_width() / 2, bar.get_height()), 
                  ha='center', va='center', xytext=(0, 5), textcoords='offset points')
+
+# Table view
+table_data = received_counts.reset_index()
+table_data.columns = ['Month', 'Received Count']
+table = plt.table(cellText=table_data.values, colLabels=table_data.columns, loc='top')
+table.auto_set_font_size(False)
+table.set_fontsize(8)  # Adjust font size as needed
+table.scale(1, 1.5)  # Adjust table height
 
 plt.title('Volumetric Throughput of Orders by Received Month')
 plt.xlabel('Month')
 plt.ylabel('Number of Orders')
 plt.legend()
+plt.subplots_adjust(left=0.2, top=0.8)  # Adjust subplot spacing
 plt.show()
 
-# 2. Volumetric Throughput by Completed Month with Count Labels
-completed_counts = df[df['completed_dt'].notnull()]['completed_month'].value_counts().sort_index()
+# 2. Volumetric Throughput by Completed Month with Table View
+plt.figure(figsize=(10, 8))
 
-plt.figure(figsize=(10, 6))
-bars = completed_counts.plot(kind='bar', color='green', label='Completed')
+# Bar chart
+ax = completed_counts.plot(kind='bar', color='green', label='Completed')
 
-for bar in bars.patches:
+# Add count labels
+for bar in ax.patches:
     plt.annotate(format(bar.get_height(), '.0f'), 
                  (bar.get_x() + bar.get_width() / 2, bar.get_height()), 
                  ha='center', va='center', xytext=(0, 5), textcoords='offset points')
+
+# Table view
+table_data = completed_counts.reset_index()
+table_data.columns = ['Month', 'Completed Count']
+table = plt.table(cellText=table_data.values, colLabels=table_data.columns, loc='top')
+table.auto_set_font_size(False)
+table.set_fontsize(8)
+table.scale(1, 1.5) 
 
 plt.title('Volumetric Throughput of Orders by Completed Month')
 plt.xlabel('Month')
 plt.ylabel('Number of Orders')
 plt.legend()
+plt.subplots_adjust(left=0.2, top=0.8)
 plt.show()
 
-# 3. Combined Bar Chart with Count Labels
-combined_counts = pd.concat([received_counts, completed_counts], axis=1)
-combined_counts.columns = ['Received', 'Completed']
+# 3. Combined Bar Chart with Table View
+plt.figure(figsize=(10, 8))
 
-plt.figure(figsize=(10, 6))
-bars = combined_counts.plot(kind='bar', rot=0)
+# Bar chart
+ax = combined_counts.plot(kind='bar', rot=0)
 
-for bar_group in bars.containers:
+# Add count labels
+for bar_group in ax.containers:
     for bar in bar_group:
         plt.annotate(format(bar.get_height(), '.0f'), 
                      (bar.get_x() + bar.get_width() / 2, bar.get_height()), 
                      ha='center', va='center', xytext=(0, 5), textcoords='offset points')
 
+# Table view
+table = plt.table(cellText=combined_counts.values, colLabels=combined_counts.columns, loc='top')
+table.auto_set_font_size(False)
+table.set_fontsize(8)
+table.scale(1, 1.5)
+
 plt.title('Volumetric Throughput - Received vs Completed')
 plt.xlabel('Month')
 plt.ylabel('Number of Orders')
 plt.legend()
+plt.subplots_adjust(left=0.2, top=0.8)
 plt.show()
 
-# 4. Stacked Bar Chart by Order Type and Order Category with Improved Labels
+# 4. Stacked Bar Chart with Table View (Modified)
 def plot_stacked_bar(category):
     filtered_df = df[df['order_category'] == category]
     pivot_df = filtered_df.pivot_table(index='received_month', columns='order_type', aggfunc='size', fill_value=0)
-    
-    plt.figure(figsize=(10, 6))
-    bars = pivot_df.plot(kind='bar', stacked=True, rot=0)
+
+    plt.figure(figsize=(10, 8))
+
+    # Bar chart
+    ax = pivot_df.plot(kind='bar', stacked=True, rot=0)
 
     # Add count labels with adjustments
-    for bar_group in bars.containers:
+    for bar_group in ax.containers:
         for bar in bar_group:
             height = bar.get_height()
             label_text = format(height, '.0f')
 
-            if height > 10:  # Example threshold
+            if height > 10:
                 plt.annotate(label_text, 
                              (bar.get_x() + bar.get_width() / 2, bar.get_y() + bar.get_height() / 2), 
                              ha='center', va='center',
-                             xytext=(0, 5),  # Vertical offset
+                             xytext=(0, 5), 
                              textcoords='offset points',
-                             rotation=45,  # Rotate labels if needed
-                             fontsize=8)  # Adjust font size as needed
+                             rotation=45, 
+                             fontsize=8)
+
+    # Table view
+    table = plt.table(cellText=pivot_df.values, colLabels=pivot_df.columns, loc='top')
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 1.5)
 
     plt.title(f'Stacked Bar Chart by Order Type for {category}')
     plt.xlabel('Month')
     plt.ylabel('Number of Orders')
     plt.legend()
+    plt.subplots_adjust(left=0.2, top=0.8)
     plt.show()
 
-# Example usage
-plot_stacked_bar('Category A') 
-
-# 5. Dynamic Plotting (requires ipywidgets)
-from ipywidgets import interact, Dropdown
-
-categories = df['order_category'].unique()
-category_dropdown = Dropdown(options=categories, description='Order Category:')
-
-@interact(category=category_dropdown)
-def update_plot(category):
-    plot_stacked_bar(category)
+# ... (rest of the code for dynamic plotting remains the same)
