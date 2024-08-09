@@ -1,0 +1,80 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Read the DataFrame
+df = pd.read_csv('data.csv')
+
+# Preprocessing
+# Convert date columns to datetime format (adjust format if necessary)
+df['received_dt'] = pd.to_datetime(df['received_dt'])
+df['completed_dt'] = pd.to_datetime(df['completed_dt'])
+
+# Extract month from date columns
+df['received_month'] = df['received_dt'].dt.to_period('M')
+df['completed_month'] = df['completed_dt'].dt.to_period('M')
+
+# 1. Volumetric Throughput by Received Month
+received_counts = df['received_month'].value_counts().sort_index()
+
+# Bar chart for Received Orders
+plt.figure(figsize=(10, 6))
+received_counts.plot(kind='bar', color='skyblue', label='Received')
+plt.title('Volumetric Throughput of Orders by Received Month')
+plt.xlabel('Month')
+plt.ylabel('Number of Orders')
+plt.legend()
+plt.show()
+
+# 2. Volumetric Throughput by Completed Month (considering completed_dt as completion indicator)
+completed_counts = df[df['completed_dt'].notnull()]['completed_month'].value_counts().sort_index()
+
+# Bar chart for Completed Orders
+plt.figure(figsize=(10, 6))
+completed_counts.plot(kind='bar', color='green', label='Completed')
+plt.title('Volumetric Throughput of Orders by Completed Month')
+plt.xlabel('Month')
+plt.ylabel('Number of Orders')
+plt.legend()
+plt.show()
+
+# 3. Combined Bar Chart for Received and Completed Orders
+combined_counts = pd.concat([received_counts, completed_counts], axis=1)
+combined_counts.columns = ['Received', 'Completed']
+
+# Combined bar chart
+plt.figure(figsize=(10, 6))
+combined_counts.plot(kind='bar', rot=0)
+plt.title('Volumetric Throughput - Received vs Completed')
+plt.xlabel('Month')
+plt.ylabel('Number of Orders')
+plt.legend()
+plt.show()
+
+# 4. Stacked Bar Chart by Order Type and Order Category
+def plot_stacked_bar(category):
+    filtered_df = df[df['order_category'] == category]
+    pivot_df = filtered_df.pivot_table(index='received_month', columns='order_type', aggfunc='size', fill_value=0)
+    
+    plt.figure(figsize=(10, 6))
+    pivot_df.plot(kind='bar', stacked=True, rot=0)
+    plt.title(f'Stacked Bar Chart by Order Type for {category}')
+    plt.xlabel('Month')
+    plt.ylabel('Number of Orders')
+    plt.legend()
+    plt.show()
+
+# Example usage: Plot for a specific order_category
+plot_stacked_bar('Category A')  # Replace 'Category A' with your desired category
+
+# 5. Dynamic Plotting (Interactive using widgets - requires ipywidgets)
+from ipywidgets import interact, Dropdown
+
+# Create a dropdown widget for order_category selection
+categories = df['order_category'].unique()
+category_dropdown = Dropdown(options=categories, description='Order Category:')
+
+# Interactive function to update the plot based on selected category
+@interact(category=category_dropdown)
+def update_plot(category):
+    plot_stacked_bar(category)
+
