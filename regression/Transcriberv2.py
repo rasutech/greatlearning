@@ -1,9 +1,6 @@
 import os
 import sys
-import moviepy.editor as mp
-import requests
 import cv2
-import whisper
 import numpy as np
 from datetime import timedelta
 
@@ -22,79 +19,84 @@ def process_video(video_path):
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     print(f"Processing video: {video_name}")
 
-    # Create output directory for screenshots
     screenshots_dir = f"{video_name}_screenshots"
     os.makedirs(screenshots_dir, exist_ok=True)
-
-    # Extract audio and generate transcript
-    audio_path = extract_audio(video_path, video_name)
-    transcript = generate_transcript(audio_path)
-    enhanced_transcript = enhance_transcript(transcript)
-    save_transcript(enhanced_transcript, video_name)
     
-    # Capture smart screenshots
     capture_screenshots(video_path, video_name, screenshots_dir)
 
-def extract_audio(video_path, video_name):
-    video = mp.VideoFileClip(video_path)
-    audio_path = f"{video_name}_audio.wav"
-    video.audio.write_audiofile(audio_path, verbose=False, logger=None)
-    return audio_path
-
-def generate_transcript(audio_path):
-    model = whisper.load_model("base")
-    print("Transcribing audio with Whisper...")
-    result = model.transcribe(audio_path)
-    return result["text"]
-
-def enhance_transcript(transcript):
-    api_endpoint = "https://api.yourorganization.com/llm"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer YOUR_API_KEY"
-    }
-    data = {
-        "prompt": f"Enhance the following transcript for sentence formation and accuracy:\n\n{transcript}"
-    }
-    try:
-        response = requests.post(api_endpoint, headers=headers, json=data)
-        response.raise_for_status()
-        return response.json().get('enhanced_text', '')
-    except requests.exceptions.RequestException as e:
-        print("Error enhancing transcript:", e)
-        return transcript
-
-def save_transcript(enhanced_transcript, video_name):
-    transcript_path = f"{video_name}_transcript.txt"
-    with open(transcript_path, "w", encoding="utf-8") as f:
-        f.write(enhanced_transcript)
-    print(f"Transcript saved to {transcript_path}")
-
-def calculate_frame_similarity(frame1, frame2):
-    """Calculate structural similarity between two frames."""
-    # Convert frames to grayscale
-    gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
-    gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
-    
-    # Calculate MSE (Mean Squared Error)
-    mse = np.mean((gray1 - gray2) ** 2)
-    
-    # Calculate similarity score (inverse of MSE, normalized)
-    similarity = 1 / (1 + mse)
-    return similarity
-
-def detect_slide_change(current_frame, prev_frame, min_similarity_threshold=0.95):
-    """Detect if there's a significant change between frames (slide change)."""
-    if prev_frame is None:
-        return True
-        
-    similarity = calculate_frame_similarity(current_frame, prev_frame)
-    return similarity < min_similarity_threshold
-
-def is_valid_content_frame(frame, min_content_threshold=0.1):
-    """Check if frame has enough content (not blank or nearly blank)."""
-    # Convert to grayscale
+def detect_content_region(frame):
+    """Detect the main content region in a Webex recording."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Apply threshold to get binary image
+    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    
+    # Find contours
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        return None
+    
+    # Find the largest rectangular contour (likely the content pane)
+    max_area = 0
+    content_region = None
+    frame_height, frame_width = frame.shape[:2]
+    min_area = (frame_width * frame_height) * 0.2  # Minimum 20% of frame
+    
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        area = w * h
+        if area > max_area and area > min_area:
+            aspect_ratio = w / h
+            # Check if it's reasonably rectangular (typical aspect ratios for content)
+            if 1.0 <= aspect_ratio <= 2.0:
+                max_area = area
+                content_region = (x, y, w, h)
+    
+    return content_region
+
+def calculate_frame_similarity(frame1, frame2, content_region):
+    """Calculate structural similarity between two frames within content region."""
+    if content_region is None:
+        return 1.0  # Return high similarity if no content region detected
+    
+    x, y, w, h = content_region
+    roi1 = frame1[y:y+h, x:x+w]
+    roi2 = frame2[y:y+h, x:x+w]
+    
+    # Convert to grayscale
+    gray1 = cv2.cvtColor(roi1, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(roi2, cv2.COLOR_BGR2GRAY)
+    
+    # Calculate histogram
+    hist1 = cv2.calcHist([gray1], [0], None, [256], [0, 256])
+    hist2 = cv2.calcHist([gray2], [0], None, [256], [0, 256])
+    
+    # Normalize histograms
+    cv2.normalize(hist1, hist1, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+    cv2.normalize(hist2, hist2, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+    
+    # Compare histograms using correlation
+    similarity = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+    
+    # Also calculate structural similarity
+    mse = np.mean((gray1 - gray2) ** 2)
+    structural_sim = 1 / (1 + mse)
+    
+    # Combine both metrics
+    combined_similarity = (similarity + structural_sim) / 2
+    return combined_similarity
+
+def is_valid_content_frame(frame, content_region, min_content_threshold=0.15):
+    """Check if frame has enough content in the content region."""
+    if content_region is None:
+        return False
+        
+    x, y, w, h = content_region
+    roi = frame[y:y+h, x:x+w]
+    
+    # Convert to grayscale
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     
     # Calculate the standard deviation of pixel values
     std_dev = np.std(gray)
@@ -102,8 +104,14 @@ def is_valid_content_frame(frame, min_content_threshold=0.1):
     # Calculate the mean of pixel values
     mean_value = np.mean(gray)
     
-    # Check if frame has enough variation and isn't too bright or dark
-    return std_dev > 20 and 20 < mean_value < 235
+    # Calculate edge density
+    edges = cv2.Canny(gray, 100, 200)
+    edge_density = np.count_nonzero(edges) / (w * h)
+    
+    # Check multiple criteria
+    return (std_dev > 25 and  # Has variation in pixel values
+            20 < mean_value < 235 and  # Not too bright or dark
+            edge_density > min_content_threshold)  # Has sufficient edge content
 
 def capture_screenshots(video_path, video_name, output_dir):
     print(f"Capturing screenshots from {video_name}...")
@@ -111,16 +119,16 @@ def capture_screenshots(video_path, video_name, output_dir):
     vidcap = cv2.VideoCapture(video_path)
     fps = vidcap.get(cv2.CAP_PROP_FPS)
     total_frames = int(vidcap.get(cv2.CAP_PROP_FRAME_COUNT))
-    duration = total_frames / fps
     
     # Parameters
-    min_time_between_captures = 2  # Minimum seconds between captures
-    frame_interval = int(fps * 0.5)  # Check every half second
-    min_similarity_threshold = 0.95  # Threshold for detecting changes
+    min_time_between_captures = 3  # Minimum seconds between captures
+    frame_interval = int(fps)  # Check every second
+    min_similarity_threshold = 0.85  # Increased threshold for detecting changes
     
     frame_count = 0
     image_count = 0
     prev_frame = None
+    content_region = None
     last_capture_time = -min_time_between_captures
     
     while True:
@@ -132,29 +140,32 @@ def capture_screenshots(video_path, video_name, output_dir):
         
         # Only process frames at the specified interval
         if frame_count % frame_interval == 0:
+            # Detect content region periodically
+            if frame_count % (frame_interval * 10) == 0:
+                content_region = detect_content_region(frame)
+            
             # Check if enough time has passed since last capture
             if current_time - last_capture_time >= min_time_between_captures:
-                # Detect if frame is a valid content frame and represents a slide change
-                if (is_valid_content_frame(frame) and 
-                    detect_slide_change(frame, prev_frame, min_similarity_threshold)):
-                    
-                    # Format timestamp for filename
-                    timestamp = str(timedelta(seconds=int(current_time)))
-                    image_path = os.path.join(
-                        output_dir, 
-                        f"{video_name}_slide_{image_count:03d}_{timestamp}.png"
-                    )
-                    
-                    cv2.imwrite(image_path, frame)
-                    print(f"Captured slide {image_count} at {timestamp}")
-                    
-                    image_count += 1
-                    last_capture_time = current_time
-                    prev_frame = frame.copy()
+                if content_region and is_valid_content_frame(frame, content_region):
+                    if prev_frame is None or calculate_frame_similarity(
+                        frame, prev_frame, content_region) < min_similarity_threshold:
+                        
+                        # Format timestamp
+                        timestamp = str(timedelta(seconds=int(current_time)))
+                        image_path = os.path.join(
+                            output_dir, 
+                            f"{video_name}_slide_{image_count:03d}_{timestamp}.png"
+                        )
+                        
+                        # Save both full frame and content region
+                        cv2.imwrite(image_path, frame)
+                        
+                        print(f"Captured slide {image_count} at {timestamp}")
+                        image_count += 1
+                        last_capture_time = current_time
+                        prev_frame = frame.copy()
         
         frame_count += 1
-        
-        # Print progress every 1000 frames
         if frame_count % 1000 == 0:
             progress = (frame_count / total_frames) * 100
             print(f"Processing: {progress:.1f}% complete")
