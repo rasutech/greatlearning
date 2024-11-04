@@ -26,104 +26,103 @@ def process_video(video_path):
 
 def detect_content_region(frame):
     """Detect the main content region in a Webex recording."""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-    # Apply threshold to get binary image
-    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-    
-    # Find contours
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if not contours:
-        return None
-    
-    # Find the largest rectangular contour (likely the content pane)
-    max_area = 0
-    content_region = None
     frame_height, frame_width = frame.shape[:2]
-    min_area = (frame_width * frame_height) * 0.2  # Minimum 20% of frame
     
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        area = w * h
-        if area > max_area and area > min_area:
-            aspect_ratio = w / h
-            # Check if it's reasonably rectangular (typical aspect ratios for content)
-            if 1.0 <= aspect_ratio <= 2.0:
-                max_area = area
-                content_region = (x, y, w, h)
+    # Default to using most of the frame if detection fails
+    default_region = (
+        int(frame_width * 0.1),  # x: 10% from left
+        int(frame_height * 0.1), # y: 10% from top
+        int(frame_width * 0.8),  # width: 80% of frame width
+        int(frame_height * 0.8)  # height: 80% of frame height
+    )
     
-    return content_region
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            print("No contours found, using default region")
+            return default_region
+        
+        # Find the largest contour
+        max_area = 0
+        content_region = default_region
+        min_area = (frame_width * frame_height) * 0.1  # Reduced to 10% minimum
+        
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            area = w * h
+            if area > max_area and area > min_area:
+                aspect_ratio = w / h
+                # Relaxed aspect ratio constraints
+                if 0.5 <= aspect_ratio <= 3.0:
+                    max_area = area
+                    content_region = (x, y, w, h)
+        
+        return content_region
+    except Exception as e:
+        print(f"Error in detect_content_region: {e}")
+        return default_region
 
 def calculate_frame_similarity(frame1, frame2, content_region):
     """Calculate structural similarity between two frames within content region."""
-    if content_region is None:
-        return 1.0  # Return high similarity if no content region detected
-    
-    x, y, w, h = content_region
-    roi1 = frame1[y:y+h, x:x+w]
-    roi2 = frame2[y:y+h, x:x+w]
-    
-    # Convert to grayscale
-    gray1 = cv2.cvtColor(roi1, cv2.COLOR_BGR2GRAY)
-    gray2 = cv2.cvtColor(roi2, cv2.COLOR_BGR2GRAY)
-    
-    # Calculate histogram
-    hist1 = cv2.calcHist([gray1], [0], None, [256], [0, 256])
-    hist2 = cv2.calcHist([gray2], [0], None, [256], [0, 256])
-    
-    # Normalize histograms
-    cv2.normalize(hist1, hist1, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
-    cv2.normalize(hist2, hist2, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
-    
-    # Compare histograms using correlation
-    similarity = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
-    
-    # Also calculate structural similarity
-    mse = np.mean((gray1 - gray2) ** 2)
-    structural_sim = 1 / (1 + mse)
-    
-    # Combine both metrics
-    combined_similarity = (similarity + structural_sim) / 2
-    return combined_similarity
-
-def is_valid_content_frame(frame, content_region, min_content_threshold=0.15):
-    """Check if frame has enough content in the content region."""
-    if content_region is None:
-        return False
+    try:
+        x, y, w, h = content_region
+        roi1 = frame1[y:y+h, x:x+w]
+        roi2 = frame2[y:y+h, x:x+w]
         
-    x, y, w, h = content_region
-    roi = frame[y:y+h, x:x+w]
-    
-    # Convert to grayscale
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    
-    # Calculate the standard deviation of pixel values
-    std_dev = np.std(gray)
-    
-    # Calculate the mean of pixel values
-    mean_value = np.mean(gray)
-    
-    # Calculate edge density
-    edges = cv2.Canny(gray, 100, 200)
-    edge_density = np.count_nonzero(edges) / (w * h)
-    
-    # Check multiple criteria
-    return (std_dev > 25 and  # Has variation in pixel values
-            20 < mean_value < 235 and  # Not too bright or dark
-            edge_density > min_content_threshold)  # Has sufficient edge content
+        # Convert to grayscale
+        gray1 = cv2.cvtColor(roi1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(roi2, cv2.COLOR_BGR2GRAY)
+        
+        # Calculate MSE (Mean Squared Error)
+        mse = np.mean((gray1 - gray2) ** 2)
+        
+        # Calculate similarity score (inverse of MSE, normalized)
+        similarity = 1 / (1 + mse)
+        return similarity
+    except Exception as e:
+        print(f"Error in calculate_frame_similarity: {e}")
+        return 1.0
+
+def is_valid_content_frame(frame, content_region, min_content_threshold=0.05):
+    """Check if frame has enough content in the content region."""
+    try:
+        x, y, w, h = content_region
+        roi = frame[y:y+h, x:x+w]
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        
+        # Calculate the standard deviation of pixel values
+        std_dev = np.std(gray)
+        
+        # Calculate the mean of pixel values
+        mean_value = np.mean(gray)
+        
+        # Relaxed criteria
+        return (std_dev > 15 and  # Reduced from 25
+                10 < mean_value < 245)  # Wider range
+    except Exception as e:
+        print(f"Error in is_valid_content_frame: {e}")
+        return True
 
 def capture_screenshots(video_path, video_name, output_dir):
     print(f"Capturing screenshots from {video_name}...")
     
     vidcap = cv2.VideoCapture(video_path)
+    if not vidcap.isOpened():
+        print(f"Error: Could not open video file {video_path}")
+        return
+        
     fps = vidcap.get(cv2.CAP_PROP_FPS)
     total_frames = int(vidcap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    # Parameters
-    min_time_between_captures = 3  # Minimum seconds between captures
+    # Parameters - more relaxed now
+    min_time_between_captures = 2  # Reduced from 3
     frame_interval = int(fps)  # Check every second
-    min_similarity_threshold = 0.85  # Increased threshold for detecting changes
+    min_similarity_threshold = 0.95  # Relaxed threshold
     
     frame_count = 0
     image_count = 0
@@ -140,16 +139,26 @@ def capture_screenshots(video_path, video_name, output_dir):
         
         # Only process frames at the specified interval
         if frame_count % frame_interval == 0:
-            # Detect content region periodically
-            if frame_count % (frame_interval * 10) == 0:
+            # Update content region periodically
+            if frame_count % (frame_interval * 30) == 0 or content_region is None:
                 content_region = detect_content_region(frame)
+                print(f"Content region updated: {content_region}")
             
             # Check if enough time has passed since last capture
             if current_time - last_capture_time >= min_time_between_captures:
-                if content_region and is_valid_content_frame(frame, content_region):
-                    if prev_frame is None or calculate_frame_similarity(
-                        frame, prev_frame, content_region) < min_similarity_threshold:
-                        
+                # Check frame validity
+                valid_frame = is_valid_content_frame(frame, content_region)
+                print(f"Frame {frame_count} valid: {valid_frame}")
+                
+                if valid_frame:
+                    # Check similarity with previous frame
+                    should_capture = True
+                    if prev_frame is not None:
+                        similarity = calculate_frame_similarity(frame, prev_frame, content_region)
+                        print(f"Frame {frame_count} similarity: {similarity:.3f}")
+                        should_capture = similarity < min_similarity_threshold
+                    
+                    if should_capture:
                         # Format timestamp
                         timestamp = str(timedelta(seconds=int(current_time)))
                         image_path = os.path.join(
@@ -157,13 +166,15 @@ def capture_screenshots(video_path, video_name, output_dir):
                             f"{video_name}_slide_{image_count:03d}_{timestamp}.png"
                         )
                         
-                        # Save both full frame and content region
-                        cv2.imwrite(image_path, frame)
-                        
-                        print(f"Captured slide {image_count} at {timestamp}")
-                        image_count += 1
-                        last_capture_time = current_time
-                        prev_frame = frame.copy()
+                        # Save frame
+                        try:
+                            cv2.imwrite(image_path, frame)
+                            print(f"Successfully captured slide {image_count} at {timestamp}")
+                            image_count += 1
+                            last_capture_time = current_time
+                            prev_frame = frame.copy()
+                        except Exception as e:
+                            print(f"Error saving image: {e}")
         
         frame_count += 1
         if frame_count % 1000 == 0:
