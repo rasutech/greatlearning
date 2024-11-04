@@ -1,0 +1,37 @@
+import streamlit as st
+import json
+
+# Initialize session state if needed
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+
+def process_message(message):
+    """Process incoming message and return response"""
+    # Add your processing logic here
+    return f"Received and processed: {message}"
+
+# Main Streamlit app
+st.title("Streamlit Server")
+
+# Display messages
+for msg in st.session_state.messages:
+    st.write(msg)
+
+# Handle form submission (for web interface)
+with st.form("message_form"):
+    user_input = st.text_input("Enter message:")
+    submit_button = st.form_submit_button("Send")
+    
+    if submit_button and user_input:
+        response = process_message(user_input)
+        st.session_state.messages.append({"user": user_input, "response": response})
+
+# Handle POST requests (for CLI client)
+if st.request.method == "POST":
+    try:
+        data = st.request.get_json()
+        if data and 'query' in data:
+            response = process_message(data['query'])
+            return json.dumps({"response": response})
+    except Exception as e:
+        return json.dumps({"error": str(e)}), 400
