@@ -1,0 +1,186 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+
+def load_and_preprocess_data(alerts_file, outages_file):
+    """
+    Load and preprocess alerts and outages data
+    """
+    # Load data
+    alerts_df = pd.read_csv(alerts_file)
+    outages_df = pd.read_csv(outages_file)
+    
+    # Convert timestamps to datetime
+    alerts_df['alert_time'] = pd.to_datetime(alerts_df['alert_time'])
+    outages_df['outage_time'] = pd.to_datetime(outages_df['outage_time'])
+    
+    return alerts_df, outages_df
+
+def create_feature_matrix(alerts_df, outages_df, time_window='1H'):
+    """
+    Create a feature matrix by aggregating alerts in time windows
+    """
+    # Create time ranges for analysis
+    start_time = min(alerts_df['alert_time'])
+    end_time = max(alerts_df['alert_time'])
+    time_ranges = pd.date_range(start=start_time, end=end_time, freq=time_window)
+    
+    # Initialize feature matrix
+    feature_matrix = pd.DataFrame(index=time_ranges[:-1])
+    
+    # Add target variable (outage)
+    feature_matrix['outage'] = 0
+    for outage_time in outages_df['outage_time']:
+        feature_matrix.loc[
+            (feature_matrix.index <= outage_time) & 
+            (feature_matrix.index > outage_time - pd.Timedelta(time_window)), 
+            'outage'
+        ] = 1
+    
+    # Aggregate alerts by source
+    sources = alerts_df['source'].unique()
+    for source in sources:
+        source_alerts = alerts_df[alerts_df['source'] == source]
+        source_counts = source_alerts.groupby(
+            pd.Grouper(key='alert_time', freq=time_window)
+        ).size()
+        feature_matrix[f'alerts_{source}'] = source_counts
+    
+    # Aggregate by category
+    categories = alerts_df['category'].unique()
+    for category in categories:
+        category_alerts = alerts_df[alerts_df['category'] == category]
+        category_counts = category_alerts.groupby(
+            pd.Grouper(key='alert_time', freq=time_window)
+        ).size()
+        feature_matrix[f'category_{category}'] = category_counts
+    
+    # Aggregate by priority
+    priorities = alerts_df['priority'].unique()
+    for priority in priorities:
+        priority_alerts = alerts_df[alerts_df['priority'] == priority]
+        priority_counts = priority_alerts.groupby(
+            pd.Grouper(key='alert_time', freq=time_window)
+        ).size()
+        feature_matrix[f'priority_{priority}'] = priority_counts
+    
+    # Fill NaN values with 0
+    feature_matrix = feature_matrix.fillna(0)
+    
+    return feature_matrix
+
+def analyze_correlations(feature_matrix):
+    """
+    Analyze correlations between features and target
+    """
+    # Calculate correlations
+    correlations = feature_matrix.corr()['outage'].sort_values(ascending=False)
+    
+    # Plot correlation heatmap
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(feature_matrix.corr(), annot=True, cmap='coolwarm', center=0)
+    plt.title('Feature Correlations')
+    plt.tight_layout()
+    plt.show()
+    
+    return correlations
+
+def train_model(feature_matrix, test_size=0.2, random_state=42):
+    """
+    Train logistic regression model
+    """
+    # Prepare features and target
+    X = feature_matrix.drop('outage', axis=1)
+    y = feature_matrix['outage']
+    
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=random_state
+    )
+    
+    # Scale features
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    
+    # Train model
+    model = LogisticRegression(random_state=random_state, class_weight='balanced')
+    model.fit(X_train_scaled, y_train)
+    
+    # Evaluate model
+    y_pred = model.predict(X_test_scaled)
+    print("\nClassification Report:")
+    print(classification_report(y_test, y_pred))
+    
+    # Plot confusion matrix
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(
+        confusion_matrix(y_test, y_pred), 
+        annot=True, 
+        fmt='d',
+        cmap='Blues'
+    )
+    plt.title('Confusion Matrix')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.show()
+    
+    # Feature importance
+    feature_importance = pd.DataFrame({
+        'feature': X.columns,
+        'importance': abs(model.coef_[0])
+    })
+    feature_importance = feature_importance.sort_values('importance', ascending=False)
+    
+    # Plot feature importance
+    plt.figure(figsize=(12, 6))
+    sns.barplot(x='importance', y='feature', data=feature_importance.head(20))
+    plt.title('Top 20 Most Important Features')
+    plt.tight_layout()
+    plt.show()
+    return model, scaler, feature_importance
+
+def predict_outage_probability(model, scaler, new_data):
+    """
+    Predict outage probability for new data
+    """
+    # Scale new data
+    new_data_scaled = scaler.transform(new_data)
+    
+    # Get probability predictions
+    probabilities = model.predict_proba(new_data_scaled)
+    
+    return probabilities[:, 1]  # Return probability of outage
+
+# Example usage
+def main():
+    # Load and preprocess data
+    alerts_df, outages_df = load_and_preprocess_data('alerts.csv', 'outages.csv')
+    
+    # Create feature matrix
+    feature_matrix = create_feature_matrix(alerts_df, outages_df, time_window='1H')
+    
+    # Analyze correlations
+    correlations = analyze_correlations(feature_matrix)
+    print("\nTop 10 correlations with outages:")
+    print(correlations.head(10))
+    
+    # Train and evaluate model
+    model, scaler, feature_importance = train_model(feature_matrix)
+
+    print("\nTop 10 most important features:")
+    print(feature_importance.head(10))
+  
+    # Example of predicting outage probability for new data
+    latest_data = feature_matrix.iloc[-1:].drop('outage', axis=1)
+    probability = predict_outage_probability(model, scaler, latest_data)
+    print(f"\nProbability of outage in latest time window: {probability[0]:.2%}")
+
+if __name__ == "__main__":
+    main()
