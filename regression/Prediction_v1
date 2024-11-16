@@ -1,0 +1,289 @@
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
+import psycopg2
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
+
+def load_outage_data(excel_path):
+    """Load and preprocess outage data from Excel"""
+    try:
+        # Read Excel file
+        outage_df = pd.read_excel(excel_path)
+        
+        # Convert date columns to datetime
+        outage_df['date'] = pd.to_datetime(outage_df['date'])
+        outage_df['opened'] = pd.to_datetime(outage_df['opened'])
+        
+        # Create outage_end_time by adding duration
+        outage_df['outage_end_time'] = outage_df['opened'] + pd.to_timedelta(outage_df['duration'], unit='minutes')
+        
+        return outage_df
+    except Exception as e:
+        raise Exception(f"Error loading outage data: {str(e)}")
+
+def fetch_alerts_data(conn, app_name, start_date, end_date):
+    """Fetch alerts data for the specified time period"""
+    query = """
+    SELECT *
+    FROM alerts_archive
+    WHERE app_name = %s
+    AND alert_start_time BETWEEN %s AND %s
+    ORDER BY alert_start_time
+    """
+    
+    return pd.read_sql_query(query, conn, params=(app_name, start_date, end_date))
+
+def create_feature_matrix(alerts_df, outage_df, lookback_window=120):
+    """Create feature matrix with lookback window before outages"""
+    feature_matrices = []
+    labels = []
+    
+    # Process each outage
+    for _, outage in outage_df.iterrows():
+        outage_time = outage['opened']
+        outage_end = outage['outage_end_time']
+        lookback_start = outage_time - timedelta(minutes=lookback_window)
+        
+        # Get alerts within lookback window
+        window_alerts = alerts_df[
+            (alerts_df['alert_start_time'] >= lookback_start) &
+            (alerts_df['alert_start_time'] <= outage_end)
+        ]
+        
+        if len(window_alerts) == 0:
+            continue
+            
+        # Create time buckets (1-minute intervals)
+        time_buckets = pd.date_range(
+            start=lookback_start,
+            end=outage_end,
+            freq='1min'
+        )
+        
+        # Process each time bucket
+        for bucket_start in time_buckets:
+            bucket_end = bucket_start + timedelta(minutes=1)
+            
+            # Get alerts in this bucket
+            bucket_alerts = window_alerts[
+                (window_alerts['alert_start_time'] >= bucket_start) &
+                (window_alerts['alert_start_time'] < bucket_end)
+            ]
+            
+            # Create features for this bucket
+            features = create_bucket_features(bucket_alerts)
+            
+            # Label as outage if bucket overlaps with outage time
+            is_outage = 1 if (bucket_start >= outage_time and bucket_start <= outage_end) else 0
+            
+            feature_matrices.append(features)
+            labels.append(is_outage)
+    
+    return pd.DataFrame(feature_matrices), np.array(labels)
+
+def create_bucket_features(bucket_alerts):
+    """Create features from alerts in a time bucket"""
+    features = {}
+    
+    # Count alerts by datasource
+    datasource_counts = bucket_alerts['datasource'].value_counts()
+    for source in datasource_counts.index:
+        features[f'datasource_{source}'] = datasource_counts[source]
+    
+    # Count alerts by condition
+    condition_counts = bucket_alerts['condition_name'].value_counts()
+    for condition in condition_counts.index:
+        features[f'condition_{condition}'] = condition_counts[condition]
+    
+    # Count alerts by entity type
+    entity_counts = bucket_alerts['entity_type'].value_counts()
+    for entity in entity_counts.index:
+        features[f'entity_{entity}'] = entity_counts[entity]
+    
+    # Count alerts by priority
+    priority_counts = bucket_alerts['priority'].value_counts()
+    for priority in priority_counts.index:
+        features[f'priority_{priority}'] = priority_counts[priority]
+    
+    return features
+
+def train_pca_model(X, n_components=0.95):
+    """Train PCA model and transform features"""
+    # Standardize features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Apply PCA
+    pca = PCA(n_components=n_components)
+    X_pca = pca.fit_transform(X_scaled)
+    
+    # Get explained variance ratio
+    explained_variance = pca.explained_variance_ratio_
+    cumulative_variance = np.cumsum(explained_variance)
+    
+    return pca, scaler, X_pca, cumulative_variance
+
+def train_logistic_regression(X_pca, y):
+    """Train logistic regression model"""
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_pca, y, test_size=0.2, random_state=42, stratify=y
+    )
+    
+    # Train model
+    model = LogisticRegression(class_weight='balanced', random_state=42)
+    model.fit(X_train, y_train)
+    
+    # Evaluate model
+    y_pred = model.predict(X_test)
+    
+    return model, classification_report(y_test, y_pred), confusion_matrix(y_test, y_pred)
+
+def analyze_feature_importance(pca, original_features, top_n=10):
+    """Analyze feature importance through PCA components"""
+    feature_importance = np.abs(pca.components_).sum(axis=0)
+    feature_importance_dict = dict(zip(original_features, feature_importance))
+    
+    return dict(sorted(
+        feature_importance_dict.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )[:top_n])
+
+def main(excel_path, app_name, db_params):
+    """Main function to run the analysis pipeline"""
+    try:
+        # Load outage data
+        print("Loading outage data...")
+        outage_df = load_outage_data(excel_path)
+        outage_df = outage_df[outage_df['app_name'] == app_name]
+        
+        if len(outage_df) == 0:
+            raise ValueError(f"No outage data found for app: {app_name}")
+        
+        # Connect to database
+        conn = psycopg2.connect(**db_params)
+        
+        # Fetch alerts data
+        print("Fetching alerts data...")
+        start_date = outage_df['opened'].min() - timedelta(days=1)
+        end_date = outage_df['outage_end_time'].max()
+        alerts_df = fetch_alerts_data(conn, app_name, start_date, end_date)
+        
+        # Create feature matrix
+        print("Creating feature matrix...")
+        X, y = create_feature_matrix(alerts_df, outage_df)
+        
+        if len(X) == 0:
+            raise ValueError("No features could be created from the alerts data")
+        
+        # Apply PCA
+        print("Applying PCA...")
+        pca, scaler, X_pca, cumulative_variance = train_pca_model(X)
+        
+        # Train logistic regression
+        print("Training logistic regression model...")
+        model, classification_rep, conf_matrix = train_logistic_regression(X_pca, y)
+        
+        # Analyze feature importance
+        important_features = analyze_feature_importance(pca, X.columns)
+        
+        # Generate report
+        generate_analysis_report(
+            app_name,
+            X.shape,
+            cumulative_variance,
+            classification_rep,
+            conf_matrix,
+            important_features
+        )
+        
+        conn.close()
+        
+    except Exception as e:
+        print(f"Error in analysis pipeline: {str(e)}")
+        if 'conn' in locals():
+            conn.close()
+
+def generate_analysis_report(app_name, data_shape, cumulative_variance, 
+                           classification_rep, conf_matrix, important_features):
+    """Generate HTML report with analysis results"""
+    report_template = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Outage Prediction Analysis - {app_name}</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            .section {{ margin-bottom: 30px; }}
+            table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; }}
+        </style>
+    </head>
+    <body>
+        <h1>Outage Prediction Analysis - {app_name}</h1>
+        <div class="section">
+            <h2>Dataset Overview</h2>
+            <p>Number of samples: {n_samples}</p>
+            <p>Number of features: {n_features}</p>
+        </div>
+        
+        <div class="section">
+            <h2>PCA Results</h2>
+            <p>Cumulative explained variance ratio:</p>
+            <pre>{cumulative_variance}</pre>
+        </div>
+        
+        <div class="section">
+            <h2>Model Performance</h2>
+            <pre>{classification_report}</pre>
+            
+            <h3>Confusion Matrix</h3>
+            <pre>{confusion_matrix}</pre>
+        </div>
+        
+        <div class="section">
+            <h2>Top Important Features</h2>
+            <pre>{important_features}</pre>
+        </div>
+    </body>
+    </html>
+    """
+    
+    report_content = report_template.format(
+        app_name=app_name,
+        n_samples=data_shape[0],
+        n_features=data_shape[1],
+        cumulative_variance=cumulative_variance,
+        classification_report=classification_rep,
+        confusion_matrix=conf_matrix,
+        important_features=important_features
+    )
+    
+    filename = f"outage_prediction_{app_name}_{datetime.now().strftime('%Y%m%d')}.html"
+    with open(filename, 'w') as f:
+        f.write(report_content)
+    
+    print(f"Analysis report generated: {filename}")
+
+if __name__ == "__main__":
+    # Configuration
+    db_params = {
+        "dbname": "your_database",
+        "user": "your_username",
+        "password": "your_password",
+        "host": "your_host",
+        "port": "your_port"
+    }
+    
+    excel_path = "path_to_your_outage_data.xlsx"
+    app_name = "YOUR_APP_NAME"
+    
+    main(excel_path, app_name, db_params)
