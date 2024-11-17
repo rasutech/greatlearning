@@ -1,212 +1,55 @@
-import pandas as pd
-import numpy as np
-from sklearn.preprocessing import StandardScaler, OneHotEncoder  # Added OneHotEncoder here
-from sklearn.decomposition import PCA
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
-from sklearn.impute import SimpleImputer
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-import psycopg2
-from datetime import datetime, timedelta
-import warnings
-warnings.filterwarnings('ignore')
-
-def preprocess_features(X, handle_method='impute'):
-    """
-    Preprocess features by handling missing values and scaling
-    
-    Parameters:
-    X : DataFrame
-    handle_method : str, 'impute' or 'drop'
-        Method to handle missing values
-    """
-    try:
-        print(f"\nInitial shape: {X.shape}")
-        
-        if handle_method == 'drop':
-            # Drop rows with any missing values
-            X = X.dropna()
-            print(f"Shape after dropping NaN rows: {X.shape}")
-        
-        # Check for infinite values
-        X = X.replace([np.inf, -np.inf], np.nan)
-        
-        # Get numeric and categorical columns
-        numeric_features = X.select_dtypes(include=['int64', 'float64']).columns
-        categorical_features = X.select_dtypes(include=['object', 'category']).columns
-        
-        # Print column types for debugging
-        print("\nNumeric features:", numeric_features.tolist())
-        print("Categorical features:", categorical_features.tolist())
-        
-        # Create preprocessing pipelines for numeric and categorical data
-        numeric_transformer = Pipeline(steps=[
-            ('imputer', SimpleImputer(strategy='mean')),
-            ('scaler', StandardScaler())
-        ])
-        
-        # Only create categorical transformer if categorical features exist
-        transformers = [('num', numeric_transformer, numeric_features)]
-        
-        if len(categorical_features) > 0:
-            categorical_transformer = Pipeline(steps=[
-                ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
-                ('onehot', OneHotEncoder(drop='first', sparse_output=False, handle_unknown='ignore'))
-            ])
-            transformers.append(('cat', categorical_transformer, categorical_features))
-        
-        # Create preprocessor
-        preprocessor = ColumnTransformer(
-            transformers=transformers,
-            remainder='drop'
-        )
-        
-        # Fit and transform the data - Fixed here
-        X_processed = preprocessor.fit_transform(X)
-        
-        # Generate feature names
-        feature_names = list(numeric_features)
-        
-        if len(categorical_features) > 0:
-            try:
-                # Get categorical feature names after one-hot encoding
-                cat_feature_names = []
-                encoder = preprocessor.named_transformers_['cat'].named_steps['onehot']
-                for feature in categorical_features:
-                    encoded_features = encoder.get_feature_names_out([feature])
-                    cat_feature_names.extend(encoded_features)
-                feature_names.extend(cat_feature_names)
-            except Exception as e:
-                print(f"Warning: Error getting categorical feature names: {str(e)}")
-                # Fallback: Create generic feature names for categorical variables
-                n_cat_features = X_processed.shape[1] - len(numeric_features)
-                cat_feature_names = [f'cat_feature_{i}' for i in range(n_cat_features)]
-                feature_names.extend(cat_feature_names)
-        
-        print(f"\nFinal shape after preprocessing: {X_processed.shape}")
-        print(f"Number of features generated: {len(feature_names)}")
-        
-        return X_processed, preprocessor, feature_names
-        
-    except Exception as e:
-        print(f"Error in preprocessing: {str(e)}")
-        raise
-
-def train_model_with_pca(X_processed, y, test_size=0.2, random_state=42):
-    """
-    Train the model with PCA and proper train-test splitting
-    
-    Parameters:
-    X_processed : processed feature matrix
-    y : target variable
-    test_size : proportion of dataset to include in the test split
-    random_state : random state for reproducibility
-    """
-    try:
-        # Split the data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_processed, y, 
-            test_size=test_size, 
-            random_state=random_state,
-            stratify=y
-        )
-        
-        print(f"Training set shape: {X_train.shape}")
-        print(f"Test set shape: {X_test.shape}")
-        
-        # Apply PCA
-        pca = PCA(n_components=0.95)  # Keep 95% of variance
-        X_train_pca = pca.fit_transform(X_train)
-        X_test_pca = pca.transform(X_test)
-        
-        print(f"PCA components: {pca.n_components_}")
-        print(f"Explained variance ratio sum: {sum(pca.explained_variance_ratio_):.4f}")
-        
-        # Train logistic regression
-        model = LogisticRegression(class_weight='balanced', random_state=random_state)
-        model.fit(X_train_pca, y_train)
-        
-        # Make predictions
-        y_pred = model.predict(X_test_pca)
-        y_pred_proba = model.predict_proba(X_test_pca)[:, 1]
-        
-        # Calculate metrics
-        results = {
-            'model': model,
-            'pca': pca,
-            'classification_report': classification_report(y_test, y_pred),
-            'confusion_matrix': confusion_matrix(y_test, y_pred),
-            'roc_auc': roc_auc_score(y_test, y_pred_proba),
-            'y_test': y_test,
-            'y_pred': y_pred,
-            'y_pred_proba': y_pred_proba
-        }
-        
-        return results
-    
-    except Exception as e:
-        print(f"Error in model training: {str(e)}")
-        raise
-
-
-def train_pca_model(X, n_components=0.95):
-    """Train PCA model with preprocessed features"""
-    # Apply PCA
-    pca = PCA(n_components=n_components)
-    X_pca = pca.fit_transform(X)
-    
-    # Get explained variance ratio
-    explained_variance = pca.explained_variance_ratio_
-    cumulative_variance = np.cumsum(explained_variance)
-    
-    print(f"Number of components selected: {pca.n_components_}")
-    print(f"Explained variance ratio: {cumulative_variance[-1]:.4f}")
-    
-    return pca, X_pca, cumulative_variance
-
-def analyze_missing_data(df):
-    """Analyze missing data in DataFrame"""
-    missing_stats = pd.DataFrame({
-        'missing_count': df.isnull().sum(),
-        'missing_percentage': (df.isnull().sum() / len(df) * 100).round(2)
-    })
-    missing_stats = missing_stats[missing_stats['missing_count'] > 0].sort_values('missing_count', ascending=False)
-    return missing_stats
-
 def main(app_name, db_params, excel_path):
-    """Main function with enhanced error handling and data preprocessing"""
+    """Main execution function"""
     try:
-        # Load and prepare data
-        # ... (previous data loading code remains the same) ...
+        # Connect to database
+        conn = connect_to_db(db_params)
+        
+        # Load outage data
+        print("Loading outage data...")
+        outage_df = load_outage_data(excel_path)
+        outage_df = outage_df[outage_df['app_name'] == app_name]
+        
+        if len(outage_df) == 0:
+            raise ValueError(f"No outage data found for app: {app_name}")
+        
+        # Load alerts data
+        print("Loading alerts data...")
+        start_date = outage_df['opened'].min() - timedelta(days=1)
+        end_date = outage_df['outage_end_time'].max()
+        alerts_df = load_alerts_data(conn, app_name, start_date, end_date)
         
         # Create feature matrix
+        print("Creating feature matrix...")
         X, y = create_feature_matrix(alerts_df, outage_df)
         
         # Analyze missing data
-        missing_stats = analyze_missing_data(X)
+        missing_stats = pd.DataFrame({
+            'missing_count': X.isnull().sum(),
+            'missing_percentage': (X.isnull().sum() / len(X) * 100).round(2)
+        })
+        missing_stats = missing_stats[missing_stats['missing_count'] > 0]
         print("\nMissing Data Analysis:")
         print(missing_stats)
         
         # Preprocess features
+        print("\nPreprocessing features...")
         X_processed, preprocessor, feature_names = preprocess_features(X)
         
-        # Train model
+        # Train model and get results
+        print("\nTraining model...")
         model_results = train_model_with_pca(X_processed, y)
-
-       # Analyze feature importance
+        
+        # Analyze feature importance
         print("\nAnalyzing feature importance...")
         feature_importance = analyze_feature_importance(
             model_results['model'],
             model_results['pca'],
-            feature_names,
-            top_n=20
+            feature_names
         )
         
         # Generate report
         print("\nGenerating report...")
-        generate_enhanced_report(
+        generate_report(
             app_name=app_name,
             data_shape=X.shape,
             model_results=model_results,
@@ -214,163 +57,27 @@ def main(app_name, db_params, excel_path):
             missing_stats=missing_stats
         )
         
+        # Close database connection
+        conn.close()
+        
+        print("\nAnalysis completed successfully!")
+        
+        return {
+            'model_results': model_results,
+            'feature_importance': feature_importance,
+            'preprocessor': preprocessor,
+            'feature_names': feature_names
+        }
+        
     except Exception as e:
         print(f"Error in analysis pipeline: {str(e)}")
         import traceback
         print(traceback.format_exc())
+        if 'conn' in locals():
+            conn.close()
+        raise
 
-def analyze_feature_importance(model, pca, feature_names, preprocessor, top_n=20):
-    """Enhanced feature importance analysis"""
-    # Get PCA components importance
-    feature_importance_pca = np.abs(pca.components_).sum(axis=0)
-    
-    # Calculate feature importance considering PCA transformation
-    feature_importance = np.abs(np.dot(model.coef_, pca.components_))
-    
-    # Create feature importance dictionary
-    importance_dict = dict(zip(feature_names, feature_importance[0]))
-    
-    # Sort features by importance
-    sorted_features = dict(sorted(
-        importance_dict.items(),
-        key=lambda x: abs(x[1]),
-        reverse=True
-    )[:top_n])
-    
-    return {
-        'top_features': sorted_features,
-        'cumulative_variance': np.cumsum(pca.explained_variance_ratio_),
-        'pca_importance': feature_importance_pca
-    }
-
-def generate_enhanced_report(app_name, data_shape, model_results, 
-                           feature_importance, missing_stats):
-    """Generate enhanced HTML report with missing data analysis"""
-    # Update the HTML template to include missing data analysis
-    report_template = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Enhanced Outage Prediction Analysis - {app_name}</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }}
-            .section {{ margin-bottom: 30px; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }}
-            .metric {{ display: inline-block; margin: 10px; padding: 15px; background-color: #f8f9fa; border-radius: 5px; }}
-            .important {{ color: #d73a49; }}
-            table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
-            th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
-            th {{ background-color: #f2f2f2; }}
-            .feature-importance {{ display: flex; align-items: center; margin: 5px 0; }}
-            .feature-bar {{ height: 20px; background-color: #0366d6; margin-left: 10px; }}
-        </style>
-    </head>
-    <body>
-        <h1>Enhanced Outage Prediction Analysis - {app_name}</h1>
-        
-        <div class="section">
-            <h2>Dataset Overview</h2>
-            <div class="metric">
-                <strong>Total Samples:</strong> {n_samples}
-            </div>
-            <div class="metric">
-                <strong>Features:</strong> {n_features}
-            </div>
-            <div class="metric">
-                <strong>Outage Events:</strong> {n_outages}
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2>Missing Data Analysis</h2>
-            <table>
-                <tr>
-                    <th>Feature</th>
-                    <th>Missing Count</th>
-                    <th>Missing Percentage</th>
-                </tr>
-                {missing_data_rows}
-            </table>
-        </div>
-        
-        <div class="section">
-            <h2>Model Performance</h2>
-            <div class="metric">
-                <strong>ROC-AUC Score:</strong> {roc_auc:.4f}
-            </div>
-            <h3>Classification Report</h3>
-            <pre>{classification_report}</pre>
-            
-            <h3>Confusion Matrix</h3>
-            <pre>{confusion_matrix}</pre>
-        </div>
-        
-        <div class="section">
-            <h2>Feature Importance Analysis</h2>
-            <p>Top {top_n} most important features:</p>
-            <div id="feature-importance-viz">
-                {feature_importance_bars}
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2>PCA Analysis</h2>
-            <p>Cumulative explained variance:</p>
-            <pre>{cumulative_variance}</pre>
-        </div>
-    </body>
-    </html>
-    """
-    
-    # Create missing data rows
-    missing_data_rows = ""
-    for feature, row in missing_stats.iterrows():
-        missing_data_rows += f"""
-        <tr>
-            <td>{feature}</td>
-            <td>{int(row['missing_count'])}</td>
-            <td>{row['missing_percentage']}%</td>
-        </tr>
-        """
-    
-    # Create feature importance visualization
-    feature_bars = ""
-    max_importance = max(abs(v) for v in feature_importance['top_features'].values())
-    for feature, importance in feature_importance['top_features'].items():
-        width_percent = (abs(importance) / max_importance) * 100
-        feature_bars += f"""
-        <div class="feature-importance">
-            <span>{feature}</span>
-            <div class="feature-bar" style="width: {width_percent}%"></div>
-            <span>{importance:.4f}</span>
-        </div>
-        """
-    
-    # Generate report content
-    report_content = report_template.format(
-        app_name=app_name,
-        n_samples=data_shape[0],
-        n_features=data_shape[1],
-        n_outages=sum(model_results['y_test']),
-        missing_data_rows=missing_data_rows,
-        roc_auc=model_results['roc_auc'],
-        classification_report=model_results['classification_report'],
-        confusion_matrix=model_results['confusion_matrix'],
-        feature_importance_bars=feature_bars,
-        cumulative_variance=feature_importance['cumulative_variance'],
-        top_n=len(feature_importance['top_features'])
-    )
-    
-    # Save report
-    filename = f"enhanced_outage_prediction_{app_name}_{datetime.now().strftime('%Y%m%d')}.html"
-    with open(filename, 'w', encoding='utf-8') as f:
-        f.write(report_content)
-    
-    print(f"\nAnalysis report generated: {filename}")
-
-# Example usage:
 if __name__ == "__main__":
-    from sklearn.preprocessing import OneHotEncoder  # Add this import at the top
-    
     # Configuration
     db_params = {
         "dbname": "your_database",
@@ -380,7 +87,129 @@ if __name__ == "__main__":
         "port": "your_port"
     }
     
-    excel_path = "path_to_your_outage_data.xlsx"
+    # Example usage
     app_name = "YOUR_APP_NAME"
+    excel_path = "path_to_your_outage_data.xlsx"
     
-    main(app_name, db_params, excel_path)
+    try:
+        # Run the analysis
+        results = main(app_name, db_params, excel_path)
+        
+        # Print summary metrics
+        print("\nSummary Metrics:")
+        print(f"ROC-AUC Score: {results['model_results']['roc_auc']:.4f}")
+        print("\nTop 5 Important Features:")
+        for feature, importance in list(results['feature_importance']['top_features'].items())[:5]:
+            print(f"{feature}: {importance:.4f}")
+            
+    except Exception as e:
+        print(f"Error running analysis: {str(e)}")
+
+# Function to make predictions on new data
+def predict_outage_probability(new_data, model_results, preprocessor, feature_names):
+    """
+    Make predictions on new data using the trained model
+    
+    Parameters:
+    new_data : DataFrame containing new alert data
+    model_results : dict containing trained model and PCA
+    preprocessor : fitted preprocessor
+    feature_names : list of feature names
+    
+    Returns:
+    Array of probabilities for outage prediction
+    """
+    try:
+        # Preprocess new data
+        X_new = preprocessor.transform(new_data)
+        
+        # Apply PCA transformation
+        X_new_pca = model_results['pca'].transform(X_new)
+        
+        # Make predictions
+        probabilities = model_results['model'].predict_proba(X_new_pca)[:, 1]
+        
+        return probabilities
+        
+    except Exception as e:
+        print(f"Error making predictions: {str(e)}")
+        raise
+
+# Example usage of prediction function
+def example_prediction():
+    """Example of how to use the prediction function"""
+    # Create sample new data
+    sample_data = pd.DataFrame({
+        'total_alerts': [5],
+        'datasource_Newrelic': [2],
+        'datasource_Prometheus': [3],
+        'priority_critical': [1],
+        'priority_warning': [4]
+    })
+    
+    try:
+        # Load saved model and preprocessor (you would need to save these first)
+        # This is just an example - you would need to implement model saving/loading
+        loaded_results = {
+            'model': saved_model,
+            'pca': saved_pca
+        }
+        loaded_preprocessor = saved_preprocessor
+        loaded_feature_names = saved_feature_names
+        
+        # Make prediction
+        probabilities = predict_outage_probability(
+            sample_data,
+            loaded_results,
+            loaded_preprocessor,
+            loaded_feature_names
+        )
+        
+        print(f"Predicted outage probability: {probabilities[0]:.4f}")
+        
+    except Exception as e:
+        print(f"Error in example prediction: {str(e)}")
+
+# Optional: Add model persistence
+def save_model(model_results, preprocessor, feature_names, filename_prefix):
+    """Save model and associated objects"""
+    from joblib import dump
+    try:
+        # Save model objects
+        dump(model_results['model'], f'{filename_prefix}_model.joblib')
+        dump(model_results['pca'], f'{filename_prefix}_pca.joblib')
+        dump(preprocessor, f'{filename_prefix}_preprocessor.joblib')
+        
+        # Save feature names
+        with open(f'{filename_prefix}_feature_names.txt', 'w') as f:
+            f.write('\n'.join(feature_names))
+            
+        print("Model and associated objects saved successfully")
+        
+    except Exception as e:
+        print(f"Error saving model: {str(e)}")
+        raise
+
+def load_model(filename_prefix):
+    """Load saved model and associated objects"""
+    from joblib import load
+    try:
+        # Load model objects
+        model = load(f'{filename_prefix}_model.joblib')
+        pca = load(f'{filename_prefix}_pca.joblib')
+        preprocessor = load(f'{filename_prefix}_preprocessor.joblib')
+        
+        # Load feature names
+        with open(f'{filename_prefix}_feature_names.txt', 'r') as f:
+            feature_names = f.read().splitlines()
+            
+        return {
+            'model': model,
+            'pca': pca,
+            'preprocessor': preprocessor,
+            'feature_names': feature_names
+        }
+        
+    except Exception as e:
+        print(f"Error loading model: {str(e)}")
+        raise
