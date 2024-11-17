@@ -22,57 +22,77 @@ def preprocess_features(X, handle_method='impute'):
     handle_method : str, 'impute' or 'drop'
         Method to handle missing values
     """
-    print(f"\nInitial shape: {X.shape}")
-    
-    if handle_method == 'drop':
-        # Drop rows with any missing values
-        X = X.dropna()
-        print(f"Shape after dropping NaN rows: {X.shape}")
+    try:
+        print(f"\nInitial shape: {X.shape}")
         
-    # Check for infinite values
-    X = X.replace([np.inf, -np.inf], np.nan)
-    
-    # Get numeric and categorical columns
-    numeric_features = X.select_dtypes(include=['int64', 'float64']).columns
-    categorical_features = X.select_dtypes(include=['object', 'category']).columns
-    
-    # Create preprocessing pipelines for numeric and categorical data
-    numeric_transformer = Pipeline(steps=[
-        ('imputer', SimpleImputer(strategy='mean')),
-        ('scaler', StandardScaler())
-    ])
-    
-    categorical_transformer = Pipeline(steps=[
-        ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
-        ('onehot', OneHotEncoder(drop='first', sparse=False, handle_unknown='ignore'))
-    ])
-    
-    # Combine transformers
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', numeric_transformer, numeric_features),
-            ('cat', categorical_transformer, categorical_features) if len(categorical_features) > 0 else None
-        ],
-        remainder='drop'
-    )
-    
-    # Remove None transformers
-    preprocessor.transformers = [t for t in preprocessor.transformers if t is not None]
-    
-    # Fit and transform the data
-    X_processed = preprocessor.fit_transform(X)
-    
-    # Get feature names after preprocessing
-    numeric_cols = numeric_features.tolist()
-    if len(categorical_features) > 0:
-        categorical_cols = preprocessor.named_transformers_['cat'].named_steps['onehot'].get_feature_names(categorical_features)
-        feature_names = numeric_cols + categorical_cols.tolist()
-    else:
-        feature_names = numeric_cols
-    
-    print(f"Final shape after preprocessing: {X_processed.shape}")
-    
-    return X_processed, preprocessor, feature_names
+        if handle_method == 'drop':
+            # Drop rows with any missing values
+            X = X.dropna()
+            print(f"Shape after dropping NaN rows: {X.shape}")
+        
+        # Check for infinite values
+        X = X.replace([np.inf, -np.inf], np.nan)
+        
+        # Get numeric and categorical columns
+        numeric_features = X.select_dtypes(include=['int64', 'float64']).columns
+        categorical_features = X.select_dtypes(include=['object', 'category']).columns
+        
+        # Print column types for debugging
+        print("\nNumeric features:", numeric_features.tolist())
+        print("Categorical features:", categorical_features.tolist())
+        
+        # Create preprocessing pipelines for numeric and categorical data
+        numeric_transformer = Pipeline(steps=[
+            ('imputer', SimpleImputer(strategy='mean')),
+            ('scaler', StandardScaler())
+        ])
+        
+        # Only create categorical transformer if categorical features exist
+        transformers = [('num', numeric_transformer, numeric_features)]
+        
+        if len(categorical_features) > 0:
+            categorical_transformer = Pipeline(steps=[
+                ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
+                ('onehot', OneHotEncoder(drop='first', sparse_output=False, handle_unknown='ignore'))
+            ])
+            transformers.append(('cat', categorical_transformer, categorical_features))
+        
+        # Create preprocessor
+        preprocessor = ColumnTransformer(
+            transformers=transformers,
+            remainder='drop'
+        )
+        
+        # Fit and transform the data - Fixed here
+        X_processed = preprocessor.fit_transform(X)
+        
+        # Generate feature names
+        feature_names = list(numeric_features)
+        
+        if len(categorical_features) > 0:
+            try:
+                # Get categorical feature names after one-hot encoding
+                cat_feature_names = []
+                encoder = preprocessor.named_transformers_['cat'].named_steps['onehot']
+                for feature in categorical_features:
+                    encoded_features = encoder.get_feature_names_out([feature])
+                    cat_feature_names.extend(encoded_features)
+                feature_names.extend(cat_feature_names)
+            except Exception as e:
+                print(f"Warning: Error getting categorical feature names: {str(e)}")
+                # Fallback: Create generic feature names for categorical variables
+                n_cat_features = X_processed.shape[1] - len(numeric_features)
+                cat_feature_names = [f'cat_feature_{i}' for i in range(n_cat_features)]
+                feature_names.extend(cat_feature_names)
+        
+        print(f"\nFinal shape after preprocessing: {X_processed.shape}")
+        print(f"Number of features generated: {len(feature_names)}")
+        
+        return X_processed, preprocessor, feature_names
+        
+    except Exception as e:
+        print(f"Error in preprocessing: {str(e)}")
+        raise
 
 def train_model_with_pca(X_processed, y, test_size=0.2, random_state=42):
     """
