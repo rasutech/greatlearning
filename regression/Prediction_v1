@@ -74,6 +74,63 @@ def preprocess_features(X, handle_method='impute'):
     
     return X_processed, preprocessor, feature_names
 
+def train_model_with_pca(X_processed, y, test_size=0.2, random_state=42):
+    """
+    Train the model with PCA and proper train-test splitting
+    
+    Parameters:
+    X_processed : processed feature matrix
+    y : target variable
+    test_size : proportion of dataset to include in the test split
+    random_state : random state for reproducibility
+    """
+    try:
+        # Split the data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_processed, y, 
+            test_size=test_size, 
+            random_state=random_state,
+            stratify=y
+        )
+        
+        print(f"Training set shape: {X_train.shape}")
+        print(f"Test set shape: {X_test.shape}")
+        
+        # Apply PCA
+        pca = PCA(n_components=0.95)  # Keep 95% of variance
+        X_train_pca = pca.fit_transform(X_train)
+        X_test_pca = pca.transform(X_test)
+        
+        print(f"PCA components: {pca.n_components_}")
+        print(f"Explained variance ratio sum: {sum(pca.explained_variance_ratio_):.4f}")
+        
+        # Train logistic regression
+        model = LogisticRegression(class_weight='balanced', random_state=random_state)
+        model.fit(X_train_pca, y_train)
+        
+        # Make predictions
+        y_pred = model.predict(X_test_pca)
+        y_pred_proba = model.predict_proba(X_test_pca)[:, 1]
+        
+        # Calculate metrics
+        results = {
+            'model': model,
+            'pca': pca,
+            'classification_report': classification_report(y_test, y_pred),
+            'confusion_matrix': confusion_matrix(y_test, y_pred),
+            'roc_auc': roc_auc_score(y_test, y_pred_proba),
+            'y_test': y_test,
+            'y_pred': y_pred,
+            'y_pred_proba': y_pred_proba
+        }
+        
+        return results
+    
+    except Exception as e:
+        print(f"Error in model training: {str(e)}")
+        raise
+
+
 def train_pca_model(X, n_components=0.95):
     """Train PCA model with preprocessed features"""
     # Apply PCA
@@ -115,45 +172,24 @@ def main(app_name, db_params, excel_path):
         # Preprocess features
         X_processed, preprocessor, feature_names = preprocess_features(X)
         
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_processed, y, test_size=0.2, random_state=42, stratify=y
-        )
-        
-        # Apply PCA
-        pca, X_train_pca, cumulative_variance = train_pca_model(X_train)
-        
-        # Transform test data
-        X_test_pca = pca.transform(X_test)
-        
         # Train model
-        model = LogisticRegression(class_weight='balanced', random_state=42)
-        model.fit(X_train_pca, y_train)
-        
-        # Make predictions
-        y_pred = model.predict(X_test_pca)
-        y_pred_proba = model.predict_proba(X_test_pca)[:, 1]
-        
-        # Calculate metrics
-        classification_rep = classification_report(y_test, y_pred)
-        conf_matrix = confusion_matrix(y_test, y_pred)
-        roc_auc = roc_auc_score(y_test, y_pred_proba)
-        
-        # Analyze feature importance
+        model_results = train_model_with_pca(X_processed, y)
+
+       # Analyze feature importance
+        print("\nAnalyzing feature importance...")
         feature_importance = analyze_feature_importance(
-            model, pca, feature_names, preprocessor, top_n=20
+            model_results['model'],
+            model_results['pca'],
+            feature_names,
+            top_n=20
         )
         
         # Generate report
+        print("\nGenerating report...")
         generate_enhanced_report(
             app_name=app_name,
             data_shape=X.shape,
-            model_results={
-                'classification_report': classification_rep,
-                'confusion_matrix': conf_matrix,
-                'roc_auc': roc_auc,
-                'y_test': y_test
-            },
+            model_results=model_results,
             feature_importance=feature_importance,
             missing_stats=missing_stats
         )
