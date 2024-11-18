@@ -136,7 +136,66 @@ def closure_trends(df):
     )
     return fig.to_html(full_html=False)
 
-def generate_html_report(charts, top_5_charts, config):
+def top_5_distribution_monthly(df):
+    """Generate monthly pie charts showing distribution of Top-5 apps vs Others"""
+    charts = []
+    
+    # Convert created_on to datetime if it's not already
+    df['created_on'] = pd.to_datetime(df['created_on'])
+    
+    # Get unique months in the data
+    months = df['created_on'].dt.to_period('M').unique()
+    
+    for month in months:
+        # Filter data for the current month
+        month_data = df[df['created_on'].dt.to_period('M') == month]
+        
+        # Get total tickets for the month
+        total_tickets = len(month_data)
+        
+        # Get top 5 apps and their counts
+        top_5_apps = month_data['app_id'].value_counts().head(5)
+        
+        # Calculate others
+        others_count = total_tickets - top_5_apps.sum()
+        
+        # Create plot data
+        plot_data = pd.concat([
+            top_5_apps,
+            pd.Series({'Others': others_count})
+        ])
+        
+        # Calculate percentages
+        plot_data_pct = (plot_data / total_tickets * 100).round(1)
+        
+        # Create labels with percentages
+        labels = [f'{idx} ({val}%)' for idx, val in plot_data_pct.items()]
+        
+        # Create the pie chart
+        fig = go.Figure(data=[go.Pie(
+            labels=labels,
+            values=plot_data.values,
+            hole=0.3
+        )])
+        
+        fig.update_layout(
+            title=f'Ticket Distribution - {month.strftime("%B %Y")}<br>'
+            f'(Top 5 Apps vs Others)<br>'
+            f'Total Tickets: {total_tickets}',
+            annotations=[{
+                'text': f'{plot_data_pct["Others"]:.1f}% Others',
+                'x': 0.5,
+                'y': 0.5,
+                'font_size': 12,
+                'showarrow': False
+            }]
+        )
+        
+        charts.append(fig.to_html(full_html=False))
+    
+    return charts
+
+def generate_html_report(charts, top_5_charts, top_5_distribution_charts, config):
     """Generate final HTML report"""
     html_template = f"""
     <!DOCTYPE html>
@@ -147,19 +206,40 @@ def generate_html_report(charts, top_5_charts, config):
         <style>
             body {{ font-family: Arial, sans-serif; margin: 20px; }}
             .chart-container {{ margin-bottom: 40px; }}
+            .chart-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(600px, 1fr));
+                gap: 20px;
+            }}
             h1, h2 {{ color: #333; }}
+            .summary {{
+                background-color: #f5f5f5;
+                padding: 20px;
+                border-radius: 5px;
+                margin-bottom: 20px;
+            }}
         </style>
     </head>
     <body>
         <h1>Incident Analysis Report</h1>
+        
         <div class="chart-container">
             <h2>Monthly Ticket Inflow</h2>
             {charts['monthly_inflow']}
         </div>
         
         <div class="chart-container">
-            <h2>Top 5 Applications by Month</h2>
-            {''.join(f'<div class="chart-container">{chart}</div>' for chart in top_5_charts)}
+            <h2>Top 5 Applications Distribution by Month</h2>
+            <div class="chart-grid">
+                {''.join(f'<div>{chart}</div>' for chart in top_5_distribution_charts)}
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <h2>Top 5 Applications Details by Month</h2>
+            <div class="chart-grid">
+                {''.join(f'<div>{chart}</div>' for chart in top_5_charts)}
+            </div>
         </div>
         
         <div class="chart-container">
@@ -200,10 +280,12 @@ def main():
             'closure_trends': closure_trends(df)
         }
         
+        # Generate Top-5 related charts
         top_5_charts = top_5_apps_monthly(df)
+        top_5_distribution_charts = top_5_distribution_monthly(df)
         
         # Generate HTML report
-        generate_html_report(charts, top_5_charts, config)
+        generate_html_report(charts, top_5_charts, top_5_distribution_charts, config)
         
         print(f"Report generated successfully at {config['output']['html_path']}")
         
