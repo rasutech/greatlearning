@@ -5,6 +5,7 @@ from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import codecs
 
 def load_config(config_file='config.ini'):
     """Load configuration from ini file"""
@@ -196,11 +197,12 @@ def top_5_distribution_monthly(df):
     return charts
 
 def generate_html_report(charts, top_5_charts, top_5_distribution_charts, config):
-    """Generate final HTML report"""
+    """Generate final HTML report with proper Unicode handling"""
     html_template = f"""
     <!DOCTYPE html>
     <html>
     <head>
+        <meta charset="utf-8">
         <title>Incident Analysis Report</title>
         <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
         <style>
@@ -255,42 +257,80 @@ def generate_html_report(charts, top_5_charts, top_5_distribution_charts, config
     </html>
     """
     
-    with open(config['output']['html_path'], 'w') as f:
-        f.write(html_template)
+    try:
+        # First attempt: Try writing with UTF-8 encoding using codecs
+        with codecs.open(config['output']['html_path'], 'w', encoding='utf-8') as f:
+            f.write(html_template)
+    except Exception as e:
+        try:
+            # Second attempt: If that fails, try writing with error handling
+            with open(config['output']['html_path'], 'w', encoding='utf-8', errors='replace') as f:
+                f.write(html_template)
+        except Exception as e:
+            # Third attempt: If all else fails, try to remove problematic characters
+            cleaned_template = html_template.encode('ascii', 'ignore').decode('ascii')
+            with open(config['output']['html_path'], 'w', encoding='utf-8') as f:
+                f.write(cleaned_template)
+            print("Warning: Some special characters were removed from the report due to encoding issues.")
 
 def main():
     # Load configuration
     config = load_config()
     
-    # Connect to database
-    conn = connect_to_db(config['database'])
+    # Add error handling for configuration
+    if 'database' not in config or 'output' not in config:
+        raise ValueError("Configuration file is missing required sections")
     
     try:
+        # Connect to database with error handling
+        conn = connect_to_db(config['database'])
+        
         # Fetch data
         df = fetch_incident_data(conn)
         
-        # Convert datetime columns
-        df['created_on'] = pd.to_datetime(df['created_on'])
-        df['resolved_at'] = pd.to_datetime(df['resolved_at'])
+        # Convert datetime columns with error handling
+        try:
+            df['created_on'] = pd.to_datetime(df['created_on'])
+            df['resolved_at'] = pd.to_datetime(df['resolved_at'])
+        except Exception as e:
+            print(f"Error converting datetime columns: {e}")
+            raise
         
-        # Generate charts
-        charts = {
-            'monthly_inflow': monthly_inflow_chart(df),
-            'resolution_trends': resolution_code_trends(df),
-            'closure_trends': closure_trends(df)
-        }
-        
-        # Generate Top-5 related charts
-        top_5_charts = top_5_apps_monthly(df)
-        top_5_distribution_charts = top_5_distribution_monthly(df)
+        # Generate charts with error handling
+        try:
+            charts = {
+                'monthly_inflow': monthly_inflow_chart(df),
+                'resolution_trends': resolution_code_trends(df),
+                'closure_trends': closure_trends(df)
+            }
+            
+            # Generate Top-5 related charts
+            top_5_charts = top_5_apps_monthly(df)
+            top_5_distribution_charts = top_5_distribution_monthly(df)
+            
+        except Exception as e:
+            print(f"Error generating charts: {e}")
+            raise
         
         # Generate HTML report
-        generate_html_report(charts, top_5_charts, top_5_distribution_charts, config)
-        
-        print(f"Report generated successfully at {config['output']['html_path']}")
-        
+        try:
+            generate_html_report(charts, top_5_charts, top_5_distribution_charts, config)
+            print(f"Report generated successfully at {config['output']['html_path']}")
+        except Exception as e:
+            print(f"Error generating HTML report: {e}")
+            raise
+            
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        raise
+    
     finally:
-        conn.close()
+        if 'conn' in locals() and conn is not None:
+            conn.close()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"Program terminated with error: {e}")
+        exit(1)
