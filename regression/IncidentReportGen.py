@@ -50,26 +50,50 @@ def top_5_apps_monthly(df):
     """Generate top 5 applications charts for each month"""
     charts = []
     
-    for month in pd.date_range(df['created_on'].min(), df['created_on'].max(), freq='M'):
-        month_data = df[df['created_on'].dt.to_period('M') == month.to_period('M')]
-        top_5_apps = month_data['app_id'].value_counts().nlargest(5).index
+    # Convert created_on to datetime if it's not already
+    df['created_on'] = pd.to_datetime(df['created_on'])
+    
+    # Get unique months in the data
+    months = df['created_on'].dt.to_period('M').unique()
+    
+    for month in months:
+        # Filter data for the current month
+        month_data = df[df['created_on'].dt.to_period('M') == month]
         
-        filtered_data = month_data[month_data['app_id'].isin(top_5_apps)]
+        # Get top 5 apps for this month
+        app_counts = month_data['app_id'].value_counts().head(5)
         
+        # Create DataFrame for plotting
+        plot_data = pd.DataFrame({
+            'Application': app_counts.index,
+            'Tickets': app_counts.values
+        })
+        
+        # Create the bar chart
         fig = px.bar(
-            filtered_data['app_id'].value_counts().reset_index(),
-            x='index',
-            y='app_id',
+            plot_data,
+            x='Application',
+            y='Tickets',
             title=f'Top 5 Applications - {month.strftime("%B %Y")}',
-            labels={'index': 'Application', 'app_id': 'Number of Tickets'}
         )
+        
+        # Update layout
+        fig.update_layout(
+            xaxis_title='Application ID',
+            yaxis_title='Number of Tickets',
+            showlegend=False
+        )
+        
         charts.append(fig.to_html(full_html=False))
     
     return charts
 
 def resolution_code_trends(df):
     """Generate monthly resolution code visualization"""
-    monthly_resolution = df.groupby([
+    # Ensure we only use rows where resolution_code is not null
+    df_resolved = df.dropna(subset=['resolved_at', 'resolution_code'])
+    
+    monthly_resolution = df_resolved.groupby([
         pd.Grouper(key='resolved_at', freq='M'),
         'resolution_code'
     ]).size().reset_index(name='count')
@@ -83,18 +107,33 @@ def resolution_code_trends(df):
 
 def closure_trends(df):
     """Generate monthly closure trends visualization"""
-    monthly_closure = df.groupby(pd.Grouper(key='resolved_at', freq='M')).size()
-    monthly_inflow = df.groupby(pd.Grouper(key='created_on', freq='M')).size()
+    # Ensure we only use valid dates
+    df_resolved = df.dropna(subset=['resolved_at'])
+    
+    monthly_closure = df_resolved.groupby(
+        pd.Grouper(key='resolved_at', freq='M')).size().reset_index(name='closed')
+    monthly_inflow = df.groupby(
+        pd.Grouper(key='created_on', freq='M')).size().reset_index(name='created')
     
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=monthly_inflow.index, y=monthly_inflow.values,
-                            name='New Tickets', mode='lines+markers'))
-    fig.add_trace(go.Scatter(x=monthly_closure.index, y=monthly_closure.values,
-                            name='Closed Tickets', mode='lines+markers'))
+    fig.add_trace(go.Scatter(
+        x=monthly_inflow['created_on'], 
+        y=monthly_inflow['created'],
+        name='New Tickets', 
+        mode='lines+markers'
+    ))
+    fig.add_trace(go.Scatter(
+        x=monthly_closure['resolved_at'], 
+        y=monthly_closure['closed'],
+        name='Closed Tickets', 
+        mode='lines+markers'
+    ))
     
-    fig.update_layout(title='Monthly Ticket Inflow vs Closure Trends',
-                     xaxis_title='Month',
-                     yaxis_title='Number of Tickets')
+    fig.update_layout(
+        title='Monthly Ticket Inflow vs Closure Trends',
+        xaxis_title='Month',
+        yaxis_title='Number of Tickets'
+    )
     return fig.to_html(full_html=False)
 
 def generate_html_report(charts, top_5_charts, config):
