@@ -332,6 +332,152 @@ class OutagePredictionSystem:
             print(traceback.format_exc())
             raise
 
+def train_model(self, X, y):
+        """Train model with improved precision"""
+        from imblearn.over_sampling import SMOTE
+        from imblearn.pipeline import Pipeline as ImbPipeline
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.metrics import precision_recall_curve
+        
+        try:
+            # Split data
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42, stratify=y
+            )
+            
+            # Create preprocessing pipeline
+            numeric_transformer = Pipeline(steps=[
+                ('imputer', SimpleImputer(strategy='mean')),
+                ('scaler', StandardScaler())
+            ])
+            
+            preprocessor = ColumnTransformer(
+                transformers=[('num', numeric_transformer, X.columns)],
+                remainder='drop'
+            )
+            
+            # Create pipeline with SMOTE and RandomForest
+            self.model = ImbPipeline([
+                ('preprocessor', preprocessor),
+                ('smote', SMOTE(random_state=42)),
+                ('pca', PCA(n_components=0.95)),
+                ('classifier', RandomForestClassifier(
+                    n_estimators=100,
+                    class_weight='balanced',
+                    random_state=42
+                ))
+            ])
+            
+            # Fit pipeline
+            self.model.fit(X_train, y_train)
+            
+            # Make predictions
+            y_pred_proba = self.model.predict_proba(X_test)[:, 1]
+            
+            # Find optimal threshold for better precision
+            precisions, recalls, thresholds = precision_recall_curve(y_test, y_pred_proba)
+            
+            # Find threshold that gives at least 0.3 precision
+            target_precision = 0.3
+            valid_indices = precisions >= target_precision
+            if any(valid_indices):
+                self.optimal_threshold = thresholds[valid_indices][-1]
+            else:
+                self.optimal_threshold = 0.5
+            
+            # Apply threshold
+            y_pred = (y_pred_proba >= self.optimal_threshold).astype(int)
+            
+            # Store feature names
+            self.feature_names = X.columns.tolist()
+            
+            results = {
+                'classification_report': classification_report(y_test, y_pred),
+                'confusion_matrix': confusion_matrix(y_test, y_pred),
+                'roc_auc': roc_auc_score(y_test, y_pred_proba),
+                'optimal_threshold': self.optimal_threshold,
+                'feature_names': self.feature_names
+            }
+            
+            return results
+            
+        except Exception as e:
+            raise Exception(f"Error in model training: {str(e)}")
+
+    def predict_outage_probability(self, new_alerts_df, time_window=120):
+        """
+        Predict outage probability for new data
+        
+        Parameters:
+        new_alerts_df: DataFrame containing new alerts data
+        time_window: lookback window in minutes
+        
+        Returns:
+        DataFrame with timestamps and predicted probabilities
+        """
+        try:
+            if self.model is None:
+                raise ValueError("Model not trained yet. Please run training first.")
+            
+            # Create feature matrix for new data
+            end_time = new_alerts_df['alert_start_time'].max()
+            start_time = end_time - pd.Timedelta(minutes=time_window)
+            
+            # Create time points for prediction
+            prediction_times = pd.date_range(
+                start=start_time,
+                end=end_time,
+                freq='1min'
+            )
+            
+            feature_records = []
+            
+            # Process each timestamp
+            for timestamp in prediction_times:
+                # Get alerts in current minute
+                current_alerts = new_alerts_df[
+                    (new_alerts_df['alert_start_time'] >= timestamp) &
+                    (new_alerts_df['alert_start_time'] < timestamp + pd.Timedelta(minutes=1))
+                ]
+                
+                # Create features
+                features = self.create_minute_features(
+                    timestamp,
+                    current_alerts,
+                    new_alerts_df,
+                    time_window,
+                    None  # No outage details needed for prediction
+                )
+                
+                feature_records.append(features)
+            
+            # Create feature matrix
+            X_new = pd.DataFrame(feature_records)
+            
+            # Ensure all features are present
+            for feature in self.feature_names:
+                if feature not in X_new.columns:
+                    X_new[feature] = 0
+            
+            # Reorder columns to match training data
+            X_new = X_new[self.feature_names]
+            
+            # Get probabilities
+            probabilities = self.model.predict_proba(X_new)[:, 1]
+            predictions = (probabilities >= self.optimal_threshold).astype(int)
+            
+            # Create results DataFrame
+            results_df = pd.DataFrame({
+                'timestamp': prediction_times,
+                'outage_probability': probabilities,
+                'predicted_outage': predictions
+            })
+            
+            return results_df
+            
+        except Exception as e:
+            raise Exception(f"Error in prediction: {str(e)}")
+
 def main():
     """Main execution function"""
     # Configuration
@@ -353,6 +499,35 @@ def main():
         results = predictor.run_analysis()
         print("\nAnalysis completed successfully!")
         print(f"ROC-AUC Score: {results['roc_auc']:.4f}")
+
+        print("\nModel trained successfully!")
+        print(f"ROC-AUC Score: {training_results['roc_auc']:.4f}")
+        print(f"Optimal threshold: {training_results['optimal_threshold']:.4f}")
+        
+        # Example of making predictions on new data
+        # First, load new data (you would need to implement this based on your needs)
+        with predictor.connect_to_db() as conn:
+            new_alerts_df = predictor.load_alerts_data(
+                conn,
+                start_date=pd.Timestamp.now() - pd.Timedelta(days=1),
+                end_date=pd.Timestamp.now()
+            )
+        
+        if len(new_alerts_df) > 0:
+            # Make predictions
+            predictions_df = predictor.predict_outage_probability(new_alerts_df)
+            
+            # Print results
+            print("\nPrediction Results:")
+            print(predictions_df[predictions_df['predicted_outage'] == 1])
+            
+            # Save predictions to file
+            predictions_df.to_csv(
+                f"predictions_{app_name}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
+                index=False
+            )
+        else:
+            print("No new alerts to analyze")
     except Exception as e:
         print(f"Analysis failed: {str(e)}")
 
