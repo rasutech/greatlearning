@@ -1,0 +1,370 @@
+import pandas as pd
+import numpy as np
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+import psycopg2
+from datetime import datetime, timedelta
+from imblearn.pipeline import Pipeline as ImbPipeline
+from imblearn.over_sampling import SMOTE
+import warnings
+warnings.filterwarnings('ignore')
+
+class OutagePredictionSystemSVM:
+    def __init__(self, db_params, app_name, excel_path):
+        """Initialize the SVM-based Outage Prediction System"""
+        self.db_params = db_params
+        self.app_name = app_name
+        self.excel_path = excel_path
+        self.model = None
+        self.optimal_threshold = None
+        self.feature_names = None
+        self.scaler = StandardScaler()
+        
+    def connect_to_db(self):
+        """Establish database connection"""
+        try:
+            conn = psycopg2.connect(**self.db_params)
+            return conn
+        except Exception as e:
+            raise Exception(f"Error connecting to database: {str(e)}")
+
+    def load_outage_data(self):
+        """Load outage data from Excel file"""
+        try:
+            outage_df = pd.read_excel(self.excel_path)
+            outage_df['date'] = pd.to_datetime(outage_df['date'])
+            outage_df['opened'] = pd.to_datetime(outage_df['opened'])
+            outage_df['outage_end_time'] = outage_df['opened'] + pd.to_timedelta(outage_df['duration'], unit='minutes')
+            return outage_df[outage_df['app_name'] == self.app_name]
+        except Exception as e:
+            raise Exception(f"Error loading outage data: {str(e)}")
+
+    def load_alerts_data(self, conn, start_date, end_date):
+        """Load critical alerts from database"""
+        try:
+            buffer_hours = 24
+            query_start = start_date - pd.Timedelta(hours=buffer_hours)
+            query_end = end_date + pd.Timedelta(hours=buffer_hours)
+            
+            query = """
+            SELECT incident_id, app_name, policy_name, condition_name,
+                   category, entity_type, entity_name, alert_description,
+                   alert_start_time, priority, datasource, environment
+            FROM alerts_archive
+            WHERE app_name = %s
+            AND priority = 'critical'
+            AND alert_start_time BETWEEN %s AND %s
+            ORDER BY alert_start_time
+            """
+            
+            print(f"Fetching alerts from {query_start} to {query_end}")
+            df = pd.read_sql_query(query, conn, params=(self.app_name, query_start, query_end))
+            print(f"Fetched {len(df)} critical alerts")
+            return df
+        except Exception as e:
+            raise Exception(f"Error loading alerts data: {str(e)}")
+
+    def create_minute_features(self, timestamp, current_alerts, all_alerts, time_window, outage_details):
+        """Create features for a specific minute"""
+        features = {}
+        
+        # Create combination features
+        if len(current_alerts) > 0:
+            current_alerts['alert_combination'] = (
+                current_alerts['datasource'] + '_' + 
+                current_alerts['policy_name'] + '_' + 
+                current_alerts['condition_name']
+            ).str.replace(' ', '_')
+            
+            combinations = current_alerts['alert_combination'].value_counts()
+            for combo, count in combinations.items():
+                features[f"alert_{combo}"] = count
+        
+        # Add total critical alerts count
+        features['total_critical_alerts'] = len(current_alerts)
+        
+        # Time-based lookback features
+        lookback_start = timestamp - pd.Timedelta(minutes=time_window)
+        lookback_alerts = all_alerts[
+            (all_alerts['alert_start_time'] >= lookback_start) &
+            (all_alerts['alert_start_time'] < timestamp)
+        ]
+        
+        if len(lookback_alerts) > 0:
+            lookback_alerts['alert_combination'] = (
+                lookback_alerts['datasource'] + '_' + 
+                lookback_alerts['policy_name'] + '_' + 
+                lookback_alerts['condition_name']
+            ).str.replace(' ', '_')
+            
+            lookback_combinations = lookback_alerts['alert_combination'].value_counts()
+            for combo, count in lookback_combinations.items():
+                features[f"lookback_{combo}"] = count
+        
+        # Temporal features
+        features['hour_of_day'] = timestamp.hour
+        features['day_of_week'] = timestamp.dayofweek
+        features['is_business_hours'] = 1 if (timestamp.hour >= 9 and timestamp.hour < 17) else 0
+        features['is_weekend'] = 1 if timestamp.dayofweek >= 5 else 0
+        
+        return features
+
+    def train_svm_model(self, X, y):
+        """Train SVM model with optimized parameters"""
+        try:
+            # Split data
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42, stratify=y
+            )
+            
+            # Create pipeline with SMOTE and SVM
+            pipeline = ImbPipeline([
+                ('scaler', StandardScaler()),
+                ('smote', SMOTE(random_state=42)),
+                ('pca', PCA(n_components=0.95)),
+                ('svm', SVC(probability=True, class_weight='balanced', random_state=42))
+            ])
+            
+            # Parameter grid for optimization
+            param_grid = {
+                'svm__C': [0.1, 1, 10],
+                'svm__kernel': ['rbf', 'linear'],
+                'svm__gamma': ['scale', 'auto']
+            }
+            
+            # Grid search with cross-validation
+            grid_search = GridSearchCV(
+                pipeline,
+                param_grid,
+                cv=5,
+                scoring='roc_auc',
+                n_jobs=-1
+            )
+            
+            print("Training SVM model with grid search...")
+            grid_search.fit(X_train, y_train)
+            
+            print(f"Best parameters: {grid_search.best_params_}")
+            self.model = grid_search.best_estimator_
+            
+            # Make predictions
+            y_pred_proba = self.model.predict_proba(X_test)[:, 1]
+            y_pred = self.model.predict(X_test)
+            
+            # Calculate optimal threshold
+            from sklearn.metrics import precision_recall_curve
+            precisions, recalls, thresholds = precision_recall_curve(y_test, y_pred_proba)
+            
+            # Find threshold that gives at least 0.3 precision
+            target_precision = 0.3
+            valid_indices = precisions >= target_precision
+            if any(valid_indices):
+                self.optimal_threshold = thresholds[valid_indices][-1]
+            else:
+                self.optimal_threshold = 0.5
+            
+            # Apply threshold
+            y_pred = (y_pred_proba >= self.optimal_threshold).astype(int)
+            
+            results = {
+                'classification_report': classification_report(y_test, y_pred),
+                'confusion_matrix': confusion_matrix(y_test, y_pred),
+                'roc_auc': roc_auc_score(y_test, y_pred_proba),
+                'optimal_threshold': self.optimal_threshold,
+                'best_params': grid_search.best_params_
+            }
+            
+            return results
+            
+        except Exception as e:
+            raise Exception(f"Error in SVM model training: {str(e)}")
+
+    def predict_outage_probability(self, new_alerts_df, time_window=120):
+        """Predict outage probability for new data"""
+        try:
+            if self.model is None:
+                raise ValueError("Model not trained yet. Please run training first.")
+            
+            # Create feature matrix for new data
+            end_time = new_alerts_df['alert_start_time'].max()
+            start_time = end_time - pd.Timedelta(minutes=time_window)
+            
+            prediction_times = pd.date_range(
+                start=start_time,
+                end=end_time,
+                freq='1min'
+            )
+            
+            feature_records = []
+            
+            for timestamp in prediction_times:
+                current_alerts = new_alerts_df[
+                    (new_alerts_df['alert_start_time'] >= timestamp) &
+                    (new_alerts_df['alert_start_time'] < timestamp + pd.Timedelta(minutes=1))
+                ]
+                
+                features = self.create_minute_features(
+                    timestamp,
+                    current_alerts,
+                    new_alerts_df,
+                    time_window,
+                    None
+                )
+                
+                feature_records.append(features)
+            
+            X_new = pd.DataFrame(feature_records)
+            
+            # Ensure all features are present
+            for feature in self.feature_names:
+                if feature not in X_new.columns:
+                    X_new[feature] = 0
+            
+            # Reorder columns to match training data
+            X_new = X_new[self.feature_names]
+            
+            # Get probabilities and predictions
+            probabilities = self.model.predict_proba(X_new)[:, 1]
+            predictions = (probabilities >= self.optimal_threshold).astype(int)
+            
+            # Create results DataFrame
+            results_df = pd.DataFrame({
+                'timestamp': prediction_times,
+                'outage_probability': probabilities,
+                'predicted_outage': predictions
+            })
+            
+            return results_df
+            
+        except Exception as e:
+            raise Exception(f"Error in prediction: {str(e)}")
+
+    def run_analysis(self):
+        """Run the complete analysis pipeline"""
+        try:
+            # Load outage data
+            print("Loading outage data...")
+            outage_df = self.load_outage_data()
+            
+            if len(outage_df) == 0:
+                raise ValueError(f"No outage data found for app: {self.app_name}")
+            
+            # Calculate date range
+            start_date = outage_df['opened'].min()
+            end_date = outage_df['opened'].max()
+            print(f"Analyzing period from {start_date} to {end_date}")
+            
+            # Load alerts data
+            with self.connect_to_db() as conn:
+                alerts_df = self.load_alerts_data(conn, start_date, end_date)
+            
+            # Create feature matrix
+            print("\nCreating feature matrix...")
+            X, y = self.create_feature_matrix(alerts_df, outage_df)
+            self.feature_names = X.columns.tolist()
+            
+            # Train model
+            print("\nTraining SVM model...")
+            results = self.train_svm_model(X, y)
+            
+            # Generate report
+            print("\nGenerating report...")
+            self.generate_report(results, y.mean())
+            
+            return results
+            
+        except Exception as e:
+            print(f"Error in analysis pipeline: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            raise
+
+    def generate_report(self, results, class_balance):
+        """Generate analysis report"""
+        report_template = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>SVM Outage Prediction Analysis - {app_name}</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }}
+                .section {{ margin-bottom: 30px; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }}
+                .metric {{ display: inline-block; margin: 10px; padding: 15px; background-color: #f8f9fa; border-radius: 5px; }}
+                pre {{ background-color: #f8f9fa; padding: 15px; border-radius: 5px; }}
+            </style>
+        </head>
+        <body>
+            <h1>SVM Outage Prediction Analysis - {app_name}</h1>
+            
+            <div class="section">
+                <h2>Model Performance</h2>
+                <div class="metric">
+                    <strong>ROC-AUC Score:</strong> {roc_auc:.4f}
+                </div>
+                <div class="metric">
+                    <strong>Class Balance:</strong> {class_balance:.2%}
+                </div>
+                <div class="metric">
+                    <strong>Optimal Threshold:</strong> {optimal_threshold:.4f}
+                </div>
+                
+                <h3>Best Parameters</h3>
+                <pre>{best_params}</pre>
+                
+                <h3>Classification Report</h3>
+                <pre>{classification_report}</pre>
+                
+                <h3>Confusion Matrix</h3>
+                <pre>{confusion_matrix}</pre>
+            </div>
+        </body>
+        </html>
+        """
+        
+        report_content = report_template.format(
+            app_name=self.app_name,
+            roc_auc=results['roc_auc'],
+            class_balance=class_balance,
+            optimal_threshold=results['optimal_threshold'],
+            best_params=results['best_params'],
+            classification_report=results['classification_report'],
+            confusion_matrix=results['confusion_matrix']
+        )
+        
+        filename = f"svm_outage_prediction_{self.app_name}_{datetime.now().strftime('%Y%m%d')}.html"
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(report_content)
+        
+        print(f"\nAnalysis report generated: {filename}")
+
+def main():
+    """Main execution function"""
+    db_params = {
+        "dbname": "your_database",
+        "user": "your_username",
+        "password": "your_password",
+        "host": "your_host",
+        "port": "your_port"
+    }
+    
+    app_name = "YOUR_APP_NAME"
+    excel_path = "path_to_your_outage_data.xlsx"
+    
+    predictor = OutagePredictionSystemSVM(db_params, app_name, excel_path)
+    
+    try:
+        results = predictor.run_analysis()
+        print("\nAnalysis completed successfully!")
+        print(f"ROC-AUC Score: {results['roc_auc']:.4f}")
+        print(f"Best parameters: {results['best_params']}")
+        
+    except Exception as e:
+        print(f"Analysis failed: {str(e)}")
+
+if __name__ == "__main__":
+    main()
