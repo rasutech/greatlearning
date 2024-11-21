@@ -115,75 +115,87 @@ class OutagePredictionSystemSVM:
         return features
 
     def train_svm_model(self, X, y):
-        """Train SVM model with optimized parameters"""
-        try:
-            # Split data
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42, stratify=y
-            )
-            
-            # Create pipeline with SMOTE and SVM
-            pipeline = ImbPipeline([
-                ('scaler', StandardScaler()),
-                ('smote', SMOTE(random_state=42)),
-                ('pca', PCA(n_components=0.95)),
-                ('svm', SVC(probability=True, class_weight='balanced', random_state=42))
-            ])
-            
-            # Parameter grid for optimization
-            param_grid = {
-                'svm__C': [0.1, 1, 10],
-                'svm__kernel': ['rbf', 'linear'],
-                'svm__gamma': ['scale', 'auto']
-            }
-            
-            # Grid search with cross-validation
-            grid_search = GridSearchCV(
-                pipeline,
-                param_grid,
-                cv=5,
-                scoring='roc_auc',
-                n_jobs=-1
-            )
-            
-            print("Training SVM model with grid search...")
-            grid_search.fit(X_train, y_train)
-            
-            print(f"Best parameters: {grid_search.best_params_}")
-            self.model = grid_search.best_estimator_
-            
-            # Make predictions
-            y_pred_proba = self.model.predict_proba(X_test)[:, 1]
-            y_pred = self.model.predict(X_test)
-            
-            # Calculate optimal threshold
-            from sklearn.metrics import precision_recall_curve
-            precisions, recalls, thresholds = precision_recall_curve(y_test, y_pred_proba)
-            
-            # Find threshold that gives at least 0.3 precision
-            target_precision = 0.3
-            valid_indices = precisions >= target_precision
-            if any(valid_indices):
-                self.optimal_threshold = thresholds[valid_indices][-1]
-            else:
-                self.optimal_threshold = 0.5
-            
-            # Apply threshold
-            y_pred = (y_pred_proba >= self.optimal_threshold).astype(int)
-            
-            results = {
-                'classification_report': classification_report(y_test, y_pred),
-                'confusion_matrix': confusion_matrix(y_test, y_pred),
-                'roc_auc': roc_auc_score(y_test, y_pred_proba),
-                'optimal_threshold': self.optimal_threshold,
-                'best_params': grid_search.best_params_
-            }
-            
-            return results
-            
-        except Exception as e:
-            raise Exception(f"Error in SVM model training: {str(e)}")
-
+    """Train SVM model with optimized parameters and reduced computation time"""
+    from sklearn.svm import LinearSVC
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.preprocessing import StandardScaler
+    from imblearn.pipeline import Pipeline as ImbPipeline
+    from imblearn.over_sampling import SMOTE
+    
+    try:
+        # Use smaller test split
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.15, random_state=42, stratify=y
+        )
+        
+        # Use faster LinearSVC as base estimator
+        base_svc = LinearSVC(
+            random_state=42,
+            class_weight='balanced',
+            max_iter=2000,
+            dual=False  # Faster for n_samples > n_features
+        )
+        
+        # Wrap with CalibratedClassifierCV for probability estimates
+        svm = CalibratedClassifierCV(base_svc, cv=3)
+        
+        # Simplified pipeline with reduced components
+        pipeline = ImbPipeline([
+            ('scaler', StandardScaler()),
+            ('smote', SMOTE(random_state=42, n_jobs=-1)),
+            ('pca', PCA(n_components=20, svd_solver='randomized')),  # Fixed components
+            ('svm', svm)
+        ])
+        
+        # Reduced parameter grid
+        param_grid = {
+            'svm__base_estimator__C': [0.1, 1.0]
+        }
+        
+        # Grid search with fewer splits
+        grid_search = GridSearchCV(
+            pipeline,
+            param_grid,
+            cv=3,  # Reduced from 5
+            scoring='roc_auc',
+            n_jobs=-1,
+            verbose=2
+        )
+        
+        print("Training SVM model with optimized parameters...")
+        grid_search.fit(X_train, y_train)
+        
+        print(f"Best parameters: {grid_search.best_params_}")
+        self.model = grid_search.best_estimator_
+        
+        # Batch predictions
+        batch_size = 5000
+        y_pred_proba = []
+        
+        for i in range(0, len(X_test), batch_size):
+            batch = X_test.iloc[i:i + batch_size]
+            proba = self.model.predict_proba(batch)[:, 1]
+            y_pred_proba.extend(proba)
+        
+        y_pred_proba = np.array(y_pred_proba)
+        
+        # Quick threshold calculation
+        target_precision = 0.3
+        self.optimal_threshold = max(0.5, np.percentile(y_pred_proba, 70))
+        
+        # Final predictions
+        y_pred = (y_pred_proba >= self.optimal_threshold).astype(int)
+        
+        return {
+            'classification_report': classification_report(y_test, y_pred),
+            'confusion_matrix': confusion_matrix(y_test, y_pred),
+            'roc_auc': roc_auc_score(y_test, y_pred_proba),
+            'optimal_threshold': self.optimal_threshold,
+            'best_params': grid_search.best_params_
+        }
+        
+    except Exception as e:
+        raise Exception(f"Error in SVM model training: {str(e)}")
     def predict_outage_probability(self, new_alerts_df, time_window=120):
         """Predict outage probability for new data"""
         try:
