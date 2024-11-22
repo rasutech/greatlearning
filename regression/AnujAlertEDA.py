@@ -235,7 +235,9 @@ def analyze_monthly_trends(df):
     
     return trend_plots, summary_table
 
-def generate_html_report(app_name, plots, resolution_analysis, text_analysis, age_stats, additional_insights):
+# Update the HTML report generation function to include the new trends
+def generate_html_report(app_name, plots, resolution_analysis, text_analysis, 
+                        age_stats, additional_insights, trend_plots, trend_summary):
     """Generate HTML report with all analyses"""
     # Generate filename with sequence number
     date_str = datetime.now().strftime('%m_%d_%Y')
@@ -264,6 +266,14 @@ def generate_html_report(app_name, plots, resolution_analysis, text_analysis, ag
     </head>
     <body>
         <h1>Alert Analysis Report - {app_name}</h1>
+        
+        <div class="section">
+            <h2>Monthly Alert Trends</h2>
+            {''.join([plot.to_html(full_html=False, include_plotlyjs=False) for plot in trend_plots])}
+            <h3>Monthly Summary Table</h3>
+            {trend_summary.to_html()}
+        </div>
+        
         <div class="section">
             <h2>Top 10 Conditions Analysis</h2>
             {''.join([plot.to_html(full_html=False, include_plotlyjs=False) for plot in plots])}
