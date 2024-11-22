@@ -67,29 +67,62 @@ def analyze_alert_descriptions(df):
     results = []
     
     for (ds, cat), group in df.groupby(['datasource', 'category']):
+        # Get unique descriptions
+        unique_descriptions = group['alert_description'].unique()
+        
+        # Skip if we have too few descriptions
+        if len(unique_descriptions) < 2:
+            continue
+            
         # Create TF-IDF vectors
         vectorizer = TfidfVectorizer(stop_words='english')
-        tfidf_matrix = vectorizer.fit_transform(group['alert_description'])
+        tfidf_matrix = vectorizer.fit_transform(unique_descriptions)  # Only use unique descriptions
         
         # Calculate similarity matrix
         similarity_matrix = cosine_similarity(tfidf_matrix)
         
         # Find similar descriptions
-        unique_descriptions = group['alert_description'].unique()
         similar_groups = []
         
         for i, desc in enumerate(unique_descriptions):
-            similar_indices = np.argsort(similarity_matrix[i])[-6:-1]  # Get top 5 similar
-            similar_desc = unique_descriptions[similar_indices]
-            similar_groups.append({
-                'datasource': ds,
-                'category': cat,
-                'base_description': desc,
-                'similar_descriptions': similar_desc.tolist()
-            })
+            # Get indices of similar descriptions, excluding self-similarity
+            similar_scores = list(enumerate(similarity_matrix[i]))
+            # Sort by similarity score, exclude self (index i)
+            similar_scores = sorted(
+                [item for item in similar_scores if item[0] != i],
+                key=lambda x: x[1],
+                reverse=True
+            )
+            
+            # Get top 5 similar descriptions (or fewer if not enough available)
+            num_similar = min(5, len(similar_scores))
+            if num_similar > 0:
+                similar_indices = [score[0] for score in similar_scores[:num_similar]]
+                similar_desc = unique_descriptions[similar_indices].tolist()
+                
+                similar_groups.append({
+                    'datasource': ds,
+                    'category': cat,
+                    'base_description': desc,
+                    'similar_descriptions': similar_desc,
+                    'similarity_scores': [score[1] for score in similar_scores[:num_similar]]
+                })
         
-        # Take top 5 groups by frequency
-        results.extend(similar_groups[:5])
+        # Sort groups by average similarity score and take top 5
+        if similar_groups:
+            similar_groups.sort(
+                key=lambda x: sum(x['similarity_scores']) / len(x['similarity_scores']),
+                reverse=True
+            )
+            results.extend(similar_groups[:5])
+    
+    # Convert results to DataFrame
+    if not results:
+        # Return empty DataFrame with correct columns if no results
+        return pd.DataFrame(columns=[
+            'datasource', 'category', 'base_description', 
+            'similar_descriptions', 'similarity_scores'
+        ])
     
     return pd.DataFrame(results)
 
