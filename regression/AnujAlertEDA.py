@@ -179,6 +179,62 @@ def additional_analysis(df):
     
     return additional_insights
 
+def analyze_monthly_trends(df):
+    """Analyze monthly trends for each datasource and category combination"""
+    # Convert alert_start_time to datetime if it's not already
+    df['alert_start_time'] = pd.to_datetime(df['alert_start_time'])
+    
+    # Extract month-year
+    df['month_year'] = df['alert_start_time'].dt.strftime('%Y-%m')
+    
+    # Group by month, datasource, and category
+    monthly_counts = df.groupby(['month_year', 'datasource', 'category']).size().reset_index(name='count')
+    
+    # Sort by month_year to ensure chronological order
+    monthly_counts = monthly_counts.sort_values('month_year')
+    
+    # Create plots for each datasource
+    trend_plots = []
+    
+    # Plot for each datasource
+    for ds in df['datasource'].unique():
+        ds_data = monthly_counts[monthly_counts['datasource'] == ds]
+        
+        fig = px.line(
+            ds_data,
+            x='month_year',
+            y='count',
+            color='category',
+            title=f'Monthly Alert Trends for {ds}',
+            labels={
+                'month_year': 'Month',
+                'count': 'Number of Alerts',
+                'category': 'Category'
+            }
+        )
+        
+        # Customize layout
+        fig.update_layout(
+            xaxis_tickangle=-45,
+            legend_title='Category',
+            hovermode='x unified'
+        )
+        
+        # Add markers to the lines
+        fig.update_traces(mode='lines+markers')
+        
+        trend_plots.append(fig)
+    
+    # Create a summary table
+    summary_table = monthly_counts.pivot_table(
+        index=['month_year'],
+        columns=['datasource', 'category'],
+        values='count',
+        fill_value=0
+    ).round(2)
+    
+    return trend_plots, summary_table
+
 def generate_html_report(app_name, plots, resolution_analysis, text_analysis, age_stats, additional_insights):
     """Generate HTML report with all analyses"""
     # Generate filename with sequence number
@@ -252,6 +308,9 @@ def main(app_name='MYAPP'):
     text_analysis = analyze_alert_descriptions(df)
     age_stats = analyze_alert_age(df)
     additional_insights = additional_analysis(df)
+
+    print("6. Analyzing monthly trends...")
+    trend_plots, trend_summary = analyze_monthly_trends(df)
     
     # Generate report
     report_file = generate_html_report(
@@ -260,7 +319,9 @@ def main(app_name='MYAPP'):
         resolution_analysis,
         text_analysis,
         age_stats,
-        additional_insights
+        additional_insights,
+        trend_plots,
+        trend_summary
     )
     
     print(f"Analysis complete. Report generated: {report_file}")
