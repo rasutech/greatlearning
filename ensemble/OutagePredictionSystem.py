@@ -11,6 +11,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.svm import SVC
 from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score
+from sklearn.model_selection import learning_curve
+
 import matplotlib.pyplot as plt
 import seaborn as sns
 from imblearn.over_sampling import SMOTE
@@ -293,106 +295,280 @@ class OutagePredictionSystem:
             y_pred = model.predict(X_test_scaled)
             y_prob = model.predict_proba(X_test_scaled)[:, 1]
             
-            # Calculate metrics
-            metrics = {
-                'Model': name,
-                'Accuracy': accuracy_score(y_test, y_pred),
-                'Precision': precision_score(y_test, y_pred),
-                'Recall': recall_score(y_test, y_pred),
-                'F1 Score': f1_score(y_test, y_pred),
-                'ROC AUC': roc_auc_score(y_test, y_prob)
+            # Generate all visualizations
+            visualization_data[name] = {
+                'confusion_matrix': self._generate_confusion_matrix(y_test, y_pred, name),
+                'roc_curve': self._generate_roc_curve(y_test, y_prob, name),
+                'pr_curve': self._generate_precision_recall_curve(y_test, y_prob, name),
+                'learning_curve': self._generate_learning_curves(model, X_resampled, y_resampled, name)
             }
-            results.append(metrics)
             
-            # Store feature importance for applicable models
             if hasattr(model, 'feature_importances_'):
-                feature_importance_data[name] = pd.DataFrame({
-                    'feature': X.columns,
-                    'importance': model.feature_importances_
-                }).sort_values('importance', ascending=False)
+                visualization_data[name]['feature_importance'] = self._generate_feature_importance_plot(
+                    model.feature_importances_, X.columns, name
+                )
+         # Generate feature correlation matrix once for all features
+        correlation_matrix_file = self._generate_feature_correlation_matrix(X)
         
-        self.generate_report(results, feature_importance_data)
+        self.generate_enhanced_report(results, visualization_data, detailed_metrics, correlation_matrix_file)
         logging.info("Model training and evaluation completed")
-    
-    def generate_report(self, results, feature_importance_data):
-        """Generate HTML report with visualizations"""
-        logging.info("Generating evaluation report")
+
+    def _generate_roc_curve(self, y_true, y_prob, model_name):
+        """Generate ROC curve visualization"""
+        fpr, tpr, _ = roc_curve(y_true, y_prob)
+        roc_auc = auc(fpr, tpr)
         
+        plt.figure(figsize=(8, 6))
+        plt.plot(fpr, tpr, color='darkorange', lw=2, 
+                label=f'ROC curve (AUC = {roc_auc:.2f})')
+        plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title(f'ROC Curve - {model_name}')
+        plt.legend(loc="lower right")
+        plt.grid(True)
+        
+        filename = f'roc_curve_{model_name.lower().replace(" ", "_")}.png'
+        plt.savefig(filename)
+        plt.close()
+        return filename
+
+    def _generate_precision_recall_curve(self, y_true, y_prob, model_name):
+        """Generate Precision-Recall curve visualization"""
+        precision, recall, _ = precision_recall_curve(y_true, y_prob)
+        pr_auc = auc(recall, precision)
+        
+        plt.figure(figsize=(8, 6))
+        plt.plot(recall, precision, color='darkorange', lw=2,
+                label=f'PR curve (AUC = {pr_auc:.2f})')
+        plt.xlabel('Recall')
+        plt.ylabel('Precision')
+        plt.title(f'Precision-Recall Curve - {model_name}')
+        plt.legend(loc="lower left")
+        plt.grid(True)
+        
+        filename = f'pr_curve_{model_name.lower().replace(" ", "_")}.png'
+        plt.savefig(filename)
+        plt.close()
+        return filename
+
+    def _generate_learning_curves(self, model, X, y, model_name):
+        """Generate learning curves to analyze overfitting"""
+        train_sizes, train_scores, test_scores = learning_curve(
+            model, X, y,
+            cv=5,
+            n_jobs=-1,
+            train_sizes=np.linspace(0.1, 1.0, 10),
+            scoring='f1'
+        )
+        
+        train_mean = np.mean(train_scores, axis=1)
+        train_std = np.std(train_scores, axis=1)
+        test_mean = np.mean(test_scores, axis=1)
+        test_std = np.std(test_scores, axis=1)
+        
+        plt.figure(figsize=(10, 6))
+        plt.plot(train_sizes, train_mean, label='Training score',
+                color='darkorange', lw=2)
+        plt.fill_between(train_sizes, train_mean - train_std,
+                        train_mean + train_std, alpha=0.1,
+                        color='darkorange')
+        plt.plot(train_sizes, test_mean, label='Cross-validation score',
+                color='navy', lw=2)
+        plt.fill_between(train_sizes, test_mean - test_std,
+                        test_mean + test_std, alpha=0.1,
+                        color='navy')
+        plt.xlabel('Training Examples')
+        plt.ylabel('F1 Score')
+        plt.title(f'Learning Curves - {model_name}')
+        plt.legend(loc='lower right')
+        plt.grid(True)
+        
+        filename = f'learning_curve_{model_name.lower().replace(" ", "_")}.png'
+        plt.savefig(filename)
+        plt.close()
+        return filename
+
+    def _generate_feature_correlation_matrix(self, X):
+        """Generate feature correlation matrix visualization"""
+        plt.figure(figsize=(12, 10))
+        correlation_matrix = X.corr()
+        mask = np.triu(np.ones_like(correlation_matrix, dtype=bool))
+        sns.heatmap(correlation_matrix, mask=mask, cmap='coolwarm', center=0,
+                   annot=False, fmt='.2f', square=True)
+        plt.title('Feature Correlation Matrix')
+        
+        filename = 'feature_correlation_matrix.png'
+        plt.savefig(filename)
+        plt.close()
+        return filename
+
+    def train_and_evaluate(self):
+        """Enhanced train and evaluate method with additional visualizations"""
+        # ... (previous code remains the same until model evaluation) ...
+        
+        visualization_data = {}
+        
+        for name, model in models.items():
+            logging.info(f"Training and evaluating {name}")
+            model.fit(X_train_scaled, y_train)
+            
+            # Make predictions
+            y_pred = model.predict(X_test_scaled)
+            y_prob = model.predict_proba(X_test_scaled)[:, 1]
+            
+            # Generate all visualizations
+            visualization_data[name] = {
+                'confusion_matrix': self._generate_confusion_matrix(y_test, y_pred, name),
+                'roc_curve': self._generate_roc_curve(y_test, y_prob, name),
+                'pr_curve': self._generate_precision_recall_curve(y_test, y_prob, name),
+                'learning_curve': self._generate_learning_curves(model, X_resampled, y_resampled, name)
+            }
+            
+            if hasattr(model, 'feature_importances_'):
+                visualization_data[name]['feature_importance'] = self._generate_feature_importance_plot(
+                    model.feature_importances_, X.columns, name
+                )
+        
+        # Generate feature correlation matrix once for all features
+        correlation_matrix_file = self._generate_feature_correlation_matrix(X)
+        
+        self.generate_enhanced_report(results, visualization_data, detailed_metrics, correlation_matrix_file)
+
+    def generate_enhanced_report(self, results, visualization_data, detailed_metrics, correlation_matrix_file):
+        """Generate enhanced HTML report with all visualizations"""
         html_content = """
         <html>
         <head>
-            <title>Outage Prediction Model Evaluation</title>
+            <title>Enhanced Outage Prediction Model Evaluation</title>
             <style>
                 body { font-family: Arial, sans-serif; margin: 20px; }
-                .metric-table { border-collapse: collapse; margin: 20px 0; }
+                .metric-table { border-collapse: collapse; margin: 20px 0; width: 100%; }
                 .metric-table td, .metric-table th { 
-                    border: 1px solid #ddd; padding: 8px; 
+                    border: 1px solid #ddd; 
+                    padding: 8px; 
+                    text-align: left;
                 }
                 .metric-table th { background-color: #f2f2f2; }
                 .plot { margin: 20px 0; }
+                .model-section { margin: 40px 0; padding: 20px; border: 1px solid #ddd; }
+                .visualization-section { display: flex; flex-wrap: wrap; justify-content: space-between; }
+                .visualization-card { 
+                    width: 45%; 
+                    margin: 10px; 
+                    padding: 10px; 
+                    border: 1px solid #eee;
+                }
+                .interpretation { margin: 10px 0; padding: 10px; background-color: #f9f9f9; }
             </style>
         </head>
         <body>
         """
         
-        # Add metrics table
-        metrics_df = pd.DataFrame(results)
-        html_content += "<h2>Model Performance Metrics</h2>"
-        html_content += metrics_df.to_html(classes='metric-table', index=False)
-        
-        # Generate and save plots
-        self._generate_performance_plots(metrics_df, feature_importance_data)
-        
-        # Add plots to HTML
+        # Add feature correlation matrix section
         html_content += """
-        <div class='plot'>
-            <h2>Model Performance Comparison</h2>
-            <img src='model_comparison.png' />
-        </div>
-        """
-        
-        for model_name in feature_importance_data.keys():
-            html_content += f"""
-            <div class='plot'>
-                <h2>Feature Importance - {model_name}</h2>
-                <img src='feature_importance_{model_name.lower().replace(" ", "_")}.png' />
+        <h2>Feature Correlation Analysis</h2>
+        <div class='visualization-card'>
+            <img src='{}' />
+            <div class='interpretation'>
+                <p><strong>Interpretation:</strong></p>
+                <ul>
+                    <li>Strong positive correlations are shown in red</li>
+                    <li>Strong negative correlations are shown in blue</li>
+                    <li>This helps identify redundant features and potential feature interactions</li>
+                </ul>
             </div>
-            """
+        </div>
+        """.format(correlation_matrix_file)
+        
+        # Add sections for each model
+        for model_name, visuals in visualization_data.items():
+            html_content += f"""
+            <div class='model-section'>
+                <h2>Model Analysis - {model_name}</h2>
+                
+                <div class='visualization-section'>
+                    <div class='visualization-card'>
+                        <h3>Confusion Matrix</h3>
+                        <img src='{visuals["confusion_matrix"]}' />
+                        <div class='interpretation'>
+                            <p><strong>Key Insights:</strong></p>
+                            <ul>
+                                <li>True Positives: Correctly predicted outages</li>
+                                <li>False Positives: False alarms</li>
+                                <li>False Negatives: Missed outages</li>
+                                <li>True Negatives: Correctly predicted non-outages</li>
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <div class='visualization-card'>
+                        <h3>ROC Curve</h3>
+                        <img src='{visuals["roc_curve"]}' />
+                        <div class='interpretation'>
+                            <p><strong>Key Insights:</strong></p>
+                            <ul>
+                                <li>Shows trade-off between sensitivity and specificity</li>
+                                <li>Higher AUC indicates better model performance</li>
+                                <li>Closer to top-left corner is better</li>
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <div class='visualization-card'>
+                        <h3>Precision-Recall Curve</h3>
+                        <img src='{visuals["pr_curve"]}' />
+                        <div class='interpretation'>
+                            <p><strong>Key Insights:</strong></p>
+                            <ul>
+                                <li>Shows trade-off between precision and recall</li>
+                                <li>Particularly important for imbalanced datasets</li>
+                                <li>Higher curve indicates better performance</li>
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <div class='visualization-card'>
+                        <h3>Learning Curves</h3>
+                        <img src='{visuals["learning_curve"]}' />
+                        <div class='interpretation'>
+                            <p><strong>Key Insights:</strong></p>
+                            <ul>
+                                <li>Shows how model learns with more data</li>
+                                <li>Gap between training and CV indicates overfitting</li>
+                                <li>Converging curves indicate good fit</li>
+                            </ul>
+                        </div>
+                    </div>
+                    """
+            
+            if 'feature_importance' in visuals:
+                html_content += f"""
+                <div class='visualization-card'>
+                    <h3>Feature Importance</h3>
+                    <img src='{visuals["feature_importance"]}' />
+                    <div class='interpretation'>
+                        <p><strong>Key Insights:</strong></p>
+                        <ul>
+                            <li>Shows most influential features</li>
+                            <li>Helps in feature selection</li>
+                            <li>Guides feature engineering efforts</li>
+                        </ul>
+                    </div>
+                </div>
+                """
+            
+            html_content += "</div></div>"
         
         html_content += "</body></html>"
         
-        # Save HTML report
+        # Save enhanced report
         with open(self.config['Files']['output_file'], 'w') as f:
             f.write(html_content)
         
-        logging.info(f"Report generated: {self.config['Files']['output_file']}")
-    
-    def _generate_performance_plots(self, metrics_df, feature_importance_data):
-        """Generate performance visualization plots"""
-        # Model comparison plot
-        plt.figure(figsize=(12, 6))
-        metrics_df.plot(
-            x='Model',
-            y=['Accuracy', 'Precision', 'Recall', 'F1 Score', 'ROC AUC'],
-            kind='bar',
-            width=0.8
-        )
-        plt.title('Model Performance Comparison')
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.savefig('model_comparison.png')
-        
-        # Feature importance plots
-        for model_name, importance_df in feature_importance_data.items():
-            plt.figure(figsize=(12, 6))
-            sns.barplot(
-                data=importance_df.head(15),
-                x='importance',
-                y='feature'
-            )
-            plt.title(f'Top 15 Important Features - {model_name}')
-            plt.tight_layout()
-            plt.savefig(f'feature_importance_{model_name.lower().replace(" ", "_")}.png')
+        logging.info(f"Enhanced report generated: {self.config['Files']['output_file']}")
 
 # Example usage
 if __name__ == "__main__":
