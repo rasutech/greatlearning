@@ -426,7 +426,8 @@ def _generate_feature_importance_plot(self, importances, feature_names, model_na
         # Train and evaluate each model
         results = []
         visualization_data = {}
-        
+        detailed_metrics = {}
+       
         for name, model in models.items():
             logging.info(f"Training {name} model")
             model.fit(X_train_scaled, y_train)
@@ -463,11 +464,36 @@ def _generate_feature_importance_plot(self, importances, feature_names, model_na
             results.append(metrics)
             
             logging.info(f"Completed evaluation for {name}")
+
+            # Calculate confusion matrix
+            cm = confusion_matrix(y_test, y_pred)
+            confusion_matrices[name] = cm
             
-        self.generate_report(results, visualization_data)
+            # Calculate detailed metrics
+            tn, fp, fn, tp = cm.ravel()
+            
+            detailed_metrics[name] = {
+                'True Positives': tp,
+                'True Negatives': tn,
+                'False Positives': fp,
+                'False Negatives': fn,
+                'Sensitivity (True Positive Rate)': tp / (tp + fn) if (tp + fn) > 0 else 0,
+                'Specificity (True Negative Rate)': tn / (tn + fp) if (tn + fp) > 0 else 0,
+                'Precision': precision_score(y_test, y_pred),
+                'Recall': recall_score(y_test, y_pred),
+                'F1 Score': f1_score(y_test, y_pred),
+                'ROC AUC': roc_auc_score(y_test, y_prob),
+                'Accuracy': accuracy_score(y_test, y_pred),
+                'False Positive Rate': fp / (fp + tn) if (fp + tn) > 0 else 0,
+                'False Negative Rate': fn / (fn + tp) if (fn + tp) > 0 else 0,
+                'Positive Predictive Value': tp / (tp + fp) if (tp + fp) > 0 else 0,
+                'Negative Predictive Value': tn / (tn + fn) if (tn + fn) > 0 else 0
+            }
+            
+        self.generate_report(results, visualization_data,detailed_metrics)
         logging.info("Model training and evaluation completed")
 
-    def generate_report(self, results, visualization_data):
+    def generate_report(self, results, visualization_data,detailed_metrics):
         """Generate HTML report with all visualizations"""
         html_content = """
         <html>
@@ -486,6 +512,7 @@ def _generate_feature_importance_plot(self, importances, feature_names, model_na
                 .model-section { margin: 40px 0; padding: 20px; border: 1px solid #ddd; }
                 .visualization-section { display: flex; flex-wrap: wrap; justify-content: space-between; }
                 .visualization-card { width: 45%; margin: 10px; padding: 10px; border: 1px solid #eee; }
+                .detailed-metrics { margin: 20px 0; }
             </style>
         </head>
         <body>
@@ -531,9 +558,25 @@ def _generate_feature_importance_plot(self, importances, feature_names, model_na
                         <img src='{visuals["feature_importance"]}' />
                     </div>
                 """
-            
+            # Add detailed metrics
+            html_content += "<div class='detailed-metrics'>"
+            html_content += "<h3>Detailed Metrics</h3>"
+            metrics_table = pd.DataFrame(
+                detailed_metrics[model_name].items(),
+                columns=['Metric', 'Value']
+            )
+            metrics_table['Value'] = metrics_table['Value'].apply(
+                lambda x: f"{x:.4f}" if isinstance(x, float) else str(x)
+            )
+            html_content += metrics_table.to_html(
+                classes='metric-table',
+                index=False
+            )
+            html_content += "</div>"
             html_content += "</div></div>"
+
         
+            
         html_content += "</body></html>"
         
         # Save report
