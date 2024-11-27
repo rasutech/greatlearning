@@ -56,23 +56,19 @@ class AlertIntelligence:
             self.alerts_df['condition_name'].fillna('')
         ).str.lower()
         
-        # Calculate 10-minute interval index
-        self.alerts_df['interval_index'] = (
-            self.alerts_df['alert_start_time']
-            .dt.floor('10T')
-            .view(np.int64) // 10**9 // 600
-        )
+        # Create 10-minute intervals for time-based analysis
+        self.alerts_df['interval_start'] = self.alerts_df['alert_start_time'].dt.floor('10T')
 
     def _cluster_alerts(self):
         """Cluster similar alerts with enhanced handling"""
-        # Create TF-IDF features
-        vectorizer = TfidfVectorizer(
-            max_features=1000,
-            stop_words='english',
-            ngram_range=(1, 2)
-        )
-        
         try:
+            # Create TF-IDF features
+            vectorizer = TfidfVectorizer(
+                max_features=1000,
+                stop_words='english',
+                ngram_range=(1, 2)
+            )
+            
             text_features = vectorizer.fit_transform(self.alerts_df['alert_text'])
             
             # Determine optimal number of clusters based on data size
@@ -158,15 +154,18 @@ class AlertIntelligence:
         # Calculate statistics for each alert cluster
         cluster_stats = self.alerts_df.groupby('alert_cluster').agg({
             'duration': ['mean', 'std', 'count'],
-            'interval_index': lambda x: x.nunique()
+            'interval_start': 'nunique'
         })
+        
+        # Rename columns for easier access
+        cluster_stats.columns = ['mean_duration', 'std_duration', 'alert_count', 'interval_count']
         
         # Calculate patterns for each cluster
         for cluster in cluster_stats.index:
-            mean_duration = cluster_stats.loc[cluster, ('duration', 'mean')]
-            std_duration = cluster_stats.loc[cluster, ('duration', 'std')]
-            count = cluster_stats.loc[cluster, ('duration', 'count')]
-            interval_count = cluster_stats.loc[cluster, ('interval_index', 'lambda')]
+            mean_duration = cluster_stats.loc[cluster, 'mean_duration']
+            std_duration = cluster_stats.loc[cluster, 'std_duration']
+            count = cluster_stats.loc[cluster, 'alert_count']
+            interval_count = cluster_stats.loc[cluster, 'interval_count']
             
             # Calculate density (alerts per interval)
             density = count / interval_count if interval_count > 0 else 0
@@ -225,12 +224,12 @@ class AlertIntelligence:
             'total_alerts': len(self.alerts_df),
             'unique_clusters': self.alerts_df['alert_cluster'].nunique(),
             'avg_duration': self.alerts_df['duration'].mean(),
-            'total_intervals': self.alerts_df['interval_index'].nunique(),
-            'alerts_per_interval': len(self.alerts_df) / self.alerts_df['interval_index'].nunique()
-            if self.alerts_df['interval_index'].nunique() > 0 else 0,
+            'total_intervals': self.alerts_df['interval_start'].nunique(),
+            'alerts_per_interval': len(self.alerts_df) / self.alerts_df['interval_start'].nunique()
+            if self.alerts_df['interval_start'].nunique() > 0 else 0,
             'cluster_stats': self.alerts_df.groupby('alert_cluster').agg({
                 'duration': ['mean', 'std', 'count'],
-                'interval_index': 'nunique'
+                'interval_start': 'nunique'
             }).to_dict(),
             'temporal_patterns': self.alerts_df.groupby([
                 'hour_of_day',
