@@ -196,52 +196,193 @@ class OutagePredictionSystem:
             logging.error(f"Error in create_window_features: {str(e)}")
             raise
     
-    def feature_engineering(self):
-        """Generate features for model training"""
-        logging.info("Starting feature engineering")
-        features_list = []
+def feature_engineering(self):
+    """Generate features for model training with 10-minute frequency"""
+    logging.info("Starting feature engineering")
+    features_list = []
+    
+    # Create a complete time series range with 10-minute frequency
+    full_range = pd.date_range(
+        start=self.alerts_df['alert_start_time'].min(),
+        end=self.alerts_df['alert_start_time'].max(),
+        freq='10T'  # 10-minute frequency
+    )
+    
+    # Track processed windows
+    processed_windows = set()
+    
+    # Configure window parameters
+    WINDOW_SIZE = timedelta(hours=8)  # Keep 8-hour look-back
+    MIN_ALERTS_THRESHOLD = 1  # Minimum alerts needed to create a feature window
+    
+    # First, process outage windows
+    for _, outage in self.outages_df.iterrows():
+        window_start = outage['Start'] - WINDOW_SIZE
+        window_end = outage['Start']
         
-        # Create features for outage windows
-        for _, outage in self.outages_df.iterrows():
-            window_start = outage['Start'] - timedelta(hours=8)
+        window_alerts = self.alerts_df[
+            (self.alerts_df['alert_start_time'] >= window_start) &
+            (self.alerts_df['alert_start_time'] <= window_end) &
+            (self.alerts_df['app_name'] == outage['app_name'])
+        ].copy()
+        
+        features = self.create_window_features(window_alerts, is_outage=True)
+        features.update({
+            'app_name': outage['app_name'],
+            'window_start': window_start,
+            'window_end': window_end,
+            'window_type': 'outage',
+            'alert_count': len(window_alerts),
+            'unique_alert_types': window_alerts['condition_name'].nunique(),
+            'alert_frequency': len(window_alerts) / (WINDOW_SIZE.total_seconds() / 3600),  # alerts per hour
+            'time_to_outage': 0  # For outage windows
+        })
+        features_list.append(features)
+        
+        # Add window to processed set
+        processed_windows.add((outage['app_name'], window_start, window_end))
+    
+    # Process non-outage windows
+    for app_name in self.alerts_df['app_name'].unique():
+        # Get next outage time for this app (if any)
+        app_outages = self.outages_df[self.outages_df['app_name'] == app_name]
+        
+        # Create sliding windows
+        for window_end in full_range:
+            window_start = window_end - WINDOW_SIZE
+            
+            # Skip if this window overlaps with any outage window
+            if any((window_end >= outage['Start'] - timedelta(minutes=10)) & 
+                   (window_end <= outage['End'])
+                   for _, outage in self.outages_df.iterrows()):
+                continue
+            
+            # Skip if window already processed
+            if (app_name, window_start, window_end) in processed_windows:
+                continue
+            
             window_alerts = self.alerts_df[
                 (self.alerts_df['alert_start_time'] >= window_start) &
-                (self.alerts_df['alert_start_time'] <= outage['Start']) &
-                (self.alerts_df['app_name'] == outage['app_name'])
+                (self.alerts_df['alert_start_time'] <= window_end) &
+                (self.alerts_df['app_name'] == app_name)
             ].copy()
             
-            features = self.create_window_features(window_alerts, is_outage=True)
-            features['app_name'] = outage['app_name']
-            features['window_end'] = outage['Start']
-            features_list.append(features)
+            # Only create features if there are sufficient alerts
+            if len(window_alerts) >= MIN_ALERTS_THRESHOLD:
+                # Calculate time to next outage
+                next_outage = app_outages[app_outages['Start'] > window_end]
+                time_to_outage = float('inf')
+                if not next_outage.empty:
+                    time_to_outage = (next_outage.iloc[0]['Start'] - window_end).total_seconds() / 3600  # in hours
+                
+                features = self.create_window_features(window_alerts, is_outage=False)
+                features.update({
+                    'app_name': app_name,
+                    'window_start': window_start,
+                    'window_end': window_end,
+                    'window_type': 'normal',
+                    'alert_count': len(window_alerts),
+                    'unique_alert_types': window_alerts['condition_name'].nunique(),
+                    'alert_frequency': len(window_alerts) / (WINDOW_SIZE.total_seconds() / 3600),  # alerts per hour
+                    'time_to_outage': time_to_outage
+                })
+                features_list.append(features)
+    
+    self.features_df = pd.DataFrame(features_list)
+    
+    # Add time-based features
+    self.features_df['hour_of_day'] = self.features_df['window_end'].dt.hour
+    self.features_df['day_of_week'] = self.features_df['window_end'].dt.dayofweek
+    self.features_df['is_business_hours'] = (
+        (self.features_df['hour_of_day'] >= 9) & 
+        (self.features_df['hour_of_day'] < 17) & 
+        (self.features_df['day_of_week'] < 5)
+    ).astype(int)
+    
+    # Sort by time
+    self.features_df.sort_values(['app_name', 'window_end'], inplace=True)
+    
+    # Generate and export enhanced summaries
+    self._export_enhanced_summaries()
+    
+    logging.info(f"Generated {len(self.features_df)} feature records")
+    return self.features_df
+
+def _export_enhanced_summaries(self):
+    """Export detailed summaries with 10-minute granularity analysis"""
+    
+    # 1. Feature Summary with enhanced time analysis
+    with pd.ExcelWriter('feature_summary.xlsx') as writer:
+        # Overall summary
+        feature_summary = pd.DataFrame({
+            'total_windows': len(self.features_df),
+            'outage_windows': len(self.features_df[self.features_df['window_type'] == 'outage']),
+            'normal_windows': len(self.features_df[self.features_df['window_type'] == 'normal']),
+            'total_alerts_processed': self.features_df['alert_count'].sum(),
+            'avg_alerts_per_window': self.features_df['alert_count'].mean(),
+            'max_alerts_in_window': self.features_df['alert_count'].max(),
+            'avg_alert_frequency': self.features_df['alert_frequency'].mean(),
+            'unique_alert_types': self.features_df['unique_alert_types'].max(),
+        }, index=[0])
+        feature_summary.to_excel(writer, sheet_name='Summary', index=False)
         
-        # Create features for non-outage windows
-        time_windows = pd.date_range(
-            start=self.alerts_df['alert_start_time'].min(),
-            end=self.alerts_df['alert_start_time'].max(),
-            freq='8H'
-        )
+        # Time-based statistics
+        time_stats = self.features_df.groupby([
+            self.features_df['window_end'].dt.date,
+            self.features_df['window_end'].dt.hour,
+            pd.cut(self.features_df['window_end'].dt.minute, bins=range(0, 61, 10))
+        ]).agg({
+            'alert_count': ['count', 'sum', 'mean'],
+            'is_outage': 'sum',
+            'alert_frequency': 'mean'
+        }).round(2)
+        time_stats.to_excel(writer, sheet_name='10-Min Intervals')
         
-        for app_name in self.outages_df['app_name'].unique():
-            for window_end in time_windows:
-                if not any((window_end >= outage['Start']) & 
-                          (window_end <= outage['End'])
-                          for _, outage in self.outages_df.iterrows()):
-                    window_start = window_end - timedelta(hours=8)
-                    window_alerts = self.alerts_df[
-                        (self.alerts_df['alert_start_time'] >= window_start) &
-                        (self.alerts_df['alert_start_time'] <= window_end) &
-                        (self.alerts_df['app_name'] == app_name)
-                    ].copy()
-                    
-                    features = self.create_window_features(window_alerts, is_outage=False)
-                    features['app_name'] = app_name
-                    features['window_end'] = window_end
-                    features_list.append(features)
+        # Hourly patterns
+        hourly_patterns = self.features_df.groupby('hour_of_day').agg({
+            'alert_count': ['mean', 'max'],
+            'is_outage': 'sum',
+            'alert_frequency': 'mean'
+        }).round(2)
+        hourly_patterns.to_excel(writer, sheet_name='Hourly Patterns')
         
-        self.features_df = pd.DataFrame(features_list)
-        logging.info(f"Generated {len(self.features_df)} feature records")
-        return self.features_df
+        # Business hours analysis
+        business_hours = self.features_df.groupby('is_business_hours').agg({
+            'alert_count': ['mean', 'sum'],
+            'is_outage': 'sum',
+            'alert_frequency': 'mean'
+        }).round(2)
+        business_hours.to_excel(writer, sheet_name='Business Hours')
+    
+    # 2. Enhanced Alert Summary
+    with pd.ExcelWriter('alert_summary.xlsx') as writer:
+        # Basic summary
+        alert_summary = pd.DataFrame({
+            'total_alerts': len(self.alerts_df),
+            'unique_apps': self.alerts_df['app_name'].nunique(),
+            'unique_conditions': self.alerts_df['condition_name'].nunique(),
+            'unique_categories': self.alerts_df['category'].nunique(),
+            'date_range': f"{self.alerts_df['alert_start_time'].min()} to {self.alerts_df['alert_start_time'].max()}",
+            'avg_duration': self.alerts_df['duration'].mean(),
+        }, index=[0])
+        alert_summary.to_excel(writer, sheet_name='Summary', index=False)
+        
+        # 10-minute interval analysis
+        alert_intervals = self.alerts_df.set_index('alert_start_time').resample('10T').agg({
+            'app_name': 'count',
+            'category': 'nunique',
+            'condition_name': 'nunique',
+            'duration': 'mean'
+        })
+        alert_intervals.columns = ['alert_count', 'unique_categories', 'unique_conditions', 'avg_duration']
+        alert_intervals.to_excel(writer, sheet_name='10-Min Intervals')
+        
+        # Alert patterns by time
+        time_patterns = self.alerts_df.groupby([
+            self.alerts_df['alert_start_time'].dt.hour,
+            self.alerts_df['alert_start_time'].dt.dayofweek
+        ]).size().unstack()
+        time_patterns.to_excel(writer, sheet_name='Time Patterns')
 
     def _generate_confusion_matrix(self, y_true, y_pred, model_name):
         """Generate confusion matrix visualization"""
@@ -381,32 +522,39 @@ def _generate_feature_importance_plot(self, importances, feature_names, model_na
         return filename
 
     def train_and_evaluate(self):
-        """Train models and evaluate their performance"""
-        logging.info("Starting model training and evaluation")
-        
         # Prepare data for training
-        X = self.features_df.drop(['is_outage', 'app_name', 'window_end'], axis=1)
+        X = self.features_df.drop(['is_outage', 'app_name', 'window_start', 'window_end', 'window_type'], axis=1)
         y = self.features_df['is_outage']
         
         # Handle missing values
         X = X.fillna(0)
         
-        # Handle imbalanced dataset
-        smote = SMOTE(random_state=int(self.config['Model']['random_state']))
-        X_resampled, y_resampled = smote.fit_resample(X, y)
+        # Log class distribution
+        class_dist = y.value_counts()
+        logging.info(f"Class distribution before split: {dict(class_dist)}")
         
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_resampled,
-            y_resampled,
-            test_size=float(self.config['Model']['test_size']),
-            random_state=int(self.config['Model']['random_state'])
-        )
+        # Use time-based split
+        train_date = self.features_df['window_end'].max() - timedelta(days=30)
+        
+        train_idx = self.features_df['window_end'] <= train_date
+        test_idx = self.features_df['window_end'] > train_date
+        
+        X_train = X[train_idx]
+        X_test = X[test_idx]
+        y_train = y[train_idx]
+        y_test = y[test_idx]
+        
+        logging.info(f"Training set size: {len(X_train)}, Test set size: {len(X_test)}")
+        
         
         # Scale features
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
+        
+        # Convert to DataFrame to keep feature names
+        X_train_scaled = pd.DataFrame(X_train_scaled, columns=X_train.columns)
+        X_test_scaled = pd.DataFrame(X_test_scaled, columns=X_test.columns)
         
         # Define models
         models = {
@@ -425,9 +573,10 @@ def _generate_feature_importance_plot(self, importances, feature_names, model_na
         
         # Train and evaluate each model
         results = []
-        visualization_data = {}
+        feature_importance_data = {}
+        confusion_matrices = {}
         detailed_metrics = {}
-       
+        
         for name, model in models.items():
             logging.info(f"Training {name} model")
             model.fit(X_train_scaled, y_train)
@@ -436,35 +585,6 @@ def _generate_feature_importance_plot(self, importances, feature_names, model_na
             y_pred = model.predict(X_test_scaled)
             y_prob = model.predict_proba(X_test_scaled)[:, 1]
             
-            # Generate visualizations
-            visualization_data[name] = {
-                'confusion_matrix': self._generate_confusion_matrix(y_test, y_pred, name),
-                'roc_curve': self._generate_roc_curve(y_test, y_prob, name),
-                'pr_curve': self._generate_precision_recall_curve(y_test, y_prob, name),
-                'learning_curve': self._generate_learning_curves(model, X_resampled, y_resampled, name)
-            }
-            
-            # Store feature importance for applicable models
-            if hasattr(model, 'feature_importances_'):
-                visualization_data[name]['feature_importance'] = self._generate_feature_importance_plot(
-                    model.feature_importances_,
-                    X.columns,
-                    name
-                )
-            
-            # Calculate metrics
-            metrics = {
-                'Model': name,
-                'Accuracy': accuracy_score(y_test, y_pred),
-                'Precision': precision_score(y_test, y_pred),
-                'Recall': recall_score(y_test, y_pred),
-                'F1 Score': f1_score(y_test, y_pred),
-                'ROC AUC': roc_auc_score(y_test, y_prob)
-            }
-            results.append(metrics)
-            
-            logging.info(f"Completed evaluation for {name}")
-
             # Calculate confusion matrix
             cm = confusion_matrix(y_test, y_pred)
             confusion_matrices[name] = cm
@@ -490,7 +610,24 @@ def _generate_feature_importance_plot(self, importances, feature_names, model_na
                 'Negative Predictive Value': tn / (tn + fn) if (tn + fn) > 0 else 0
             }
             
-        self.generate_report(results, visualization_data,detailed_metrics)
+            # Store basic metrics for summary
+            results.append({
+                'Model': name,
+                'Accuracy': detailed_metrics[name]['Accuracy'],
+                'Precision': detailed_metrics[name]['Precision'],
+                'Recall': detailed_metrics[name]['Recall'],
+                'F1 Score': detailed_metrics[name]['F1 Score'],
+                'ROC AUC': detailed_metrics[name]['ROC AUC']
+            })
+            
+            # Store feature importance for applicable models
+            if hasattr(model, 'feature_importances_'):
+                feature_importance_data[name] = pd.DataFrame({
+                    'feature': X.columns,
+                    'importance': model.feature_importances_
+                }).sort_values('importance', ascending=False)
+        
+        self.generate_report(results, feature_importance_data, confusion_matrices, detailed_metrics)
         logging.info("Model training and evaluation completed")
 
     def generate_report(self, results, visualization_data,detailed_metrics):
