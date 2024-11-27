@@ -108,57 +108,72 @@ class AlertAnalysisSystem:
             raise
 
     def calculate_alert_temperature(self, alert_df, entity_group_cols):
-        """Calculate temperature scores for alert groups"""
-        if alert_df.empty:
-            logger.warning("No alerts provided for temperature calculation")
-            return pd.DataFrame(columns=entity_group_cols + ['temperature', 'temp_category'])
+    """Calculate temperature scores for alert groups with proper boolean handling"""
+    if alert_df.empty:
+        logger.warning("No alerts provided for temperature calculation")
+        return pd.DataFrame(columns=entity_group_cols + ['temperature', 'temp_category'])
 
-        try:
-            def get_temperature_score(group):
-                total_alerts = len(group)
-                priority_weights = {'critical': 1.0, 'high': 0.7, 'medium': 0.4, 'low': 0.2}
-                
-                priority_score = group['priority'].map(
-                    lambda x: priority_weights.get(x.lower(), 0.1)
-                ).mean()
-                
-                root_incident_ratio = group['is_root_incident'].mean()
-                avg_duration = group['alert_duration_hours'].mean()
-                max_age = group['alert_age_hours'].max()
-                
-                duration_score = min((avg_duration / 2.0), 1.0)
-                age_score = min((max_age / 2.0), 1.0)
-                
-                time_range = (
-                    (group['alert_start_time'].max() - group['alert_start_time'].min())
-                    .total_seconds() / 3600
-                )
-                frequency = total_alerts / (time_range if time_range > 0 else 1)
-                
-                temperature = (
-                    (frequency * 20) +
-                    (priority_score * 25) +
-                    (root_incident_ratio * 15) +
-                    (duration_score * 20) +
-                    (age_score * 20)
-                )
-                
-                return min(temperature * 100, 100)
-
-            temperature_df = alert_df.groupby(entity_group_cols).apply(
-                get_temperature_score
-            ).reset_index(name='temperature')
+    try:
+        def get_temperature_score(group):
+            total_alerts = len(group)
+            priority_weights = {'critical': 1.0, 'high': 0.7, 'medium': 0.4, 'low': 0.2}
             
-            temperature_df['temp_category'] = pd.cut(
-                temperature_df['temperature'],
-                bins=[0, 20, 40, 60, 80, 100],
-                labels=['Very Low', 'Low', 'Medium', 'High', 'Very High']
+            # Handle priority mapping with error checking
+            priority_score = group['priority'].map(
+                lambda x: priority_weights.get(str(x).lower(), 0.1)
+            ).mean()
+            
+            # Convert boolean to numeric
+            root_incident_ratio = pd.to_numeric(
+                group['is_root_incident'].map(
+                    lambda x: 1 if pd.isna(x) else (1 if str(x).lower() == 'true' else 0)
+                )
+            ).mean()
+            
+            # Ensure numeric values for duration and age
+            avg_duration = pd.to_numeric(group['alert_duration_hours'], errors='coerce').fillna(0).mean()
+            max_age = pd.to_numeric(group['alert_age_hours'], errors='coerce').fillna(0).max()
+            
+            duration_score = min((avg_duration / 2.0), 1.0)
+            age_score = min((max_age / 2.0), 1.0)
+            
+            time_range = (
+                (group['alert_start_time'].max() - group['alert_start_time'].min())
+                .total_seconds() / 3600
+            )
+            frequency = total_alerts / (time_range if time_range > 0 else 1)
+            
+            temperature = (
+                (frequency * 20) +
+                (priority_score * 25) +
+                (root_incident_ratio * 15) +
+                (duration_score * 20) +
+                (age_score * 20)
             )
             
-            return temperature_df
-        except Exception as e:
-            logger.error(f"Temperature calculation failed: {str(e)}")
-            raise
+            return min(temperature * 100, 100)
+
+        # Pre-process is_root_incident column
+        alert_df['is_root_incident'] = alert_df['is_root_incident'].map(
+            lambda x: True if str(x).lower() == 'true' else False
+        )
+
+        temperature_df = alert_df.groupby(entity_group_cols).apply(
+            get_temperature_score
+        ).reset_index(name='temperature')
+        
+        temperature_df['temp_category'] = pd.cut(
+            temperature_df['temperature'],
+            bins=[0, 20, 40, 60, 80, 100],
+            labels=['Very Low', 'Low', 'Medium', 'High', 'Very High']
+        )
+        
+        return temperature_df
+    except Exception as e:
+        logger.error(f"Temperature calculation failed: {str(e)}")
+        logger.error(f"Data types in alert_df: {alert_df.dtypes}")
+        logger.error(f"Sample of is_root_incident values: {alert_df['is_root_incident'].head()}")
+        raise
 
     def create_outage_visualization(self, feature_df, outage_row):
         """Create visualization for a single outage"""
