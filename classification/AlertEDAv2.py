@@ -7,6 +7,92 @@ from plotly.subplots import make_subplots
 import warnings
 warnings.filterwarnings('ignore')
 
+def load_outage_data(filepath):
+    """Load outage data from Excel file"""
+    outage_df = pd.read_excel(filepath)
+    # Standardize column names
+    outage_df.columns = [col.lower() for col in outage_df.columns]
+    return outage_df
+
+def calculate_alert_temperature(alert_df, entity_group_cols):
+    """
+    Calculate alert temperature based on multiple factors:
+    1. Frequency of alerts
+    2. Priority distribution
+    3. Root incident ratio
+    4. Alert duration
+    """
+    
+    def get_temperature_score(group):
+        # Calculate various metrics
+        total_alerts = len(group)
+        priority_weights = {'critical': 1.0, 'high': 0.7, 'medium': 0.4, 'low': 0.2}
+        
+        # Priority score
+        priority_score = group['priority'].map(priority_weights).mean()
+        
+        # Root incident ratio
+        root_incident_ratio = group['is_root_incident'].mean()
+        
+        # Alert duration
+        avg_duration = (group['alert_end_time'] - group['alert_start_time']).mean().total_seconds() / 3600
+        
+        # Calculate frequency (alerts per hour)
+        time_range = (group['alert_start_time'].max() - group['alert_start_time'].min()).total_seconds() / 3600
+        frequency = total_alerts / (time_range if time_range > 0 else 1)
+        
+        # Combine metrics into temperature score (0-100 scale)
+        temperature = (
+            (frequency * 25) +  # 25% weight for frequency
+            (priority_score * 35) +  # 35% weight for priority
+            (root_incident_ratio * 20) +  # 20% weight for root incidents
+            (min(avg_duration, 2) / 2 * 20)  # 20% weight for duration (capped at 2 hours)
+        )
+        
+        return min(temperature * 100, 100)  # Cap at 100
+    
+    # Calculate temperature for each group
+    temperature_df = alert_df.groupby(entity_group_cols).apply(
+        get_temperature_score
+    ).reset_index(name='temperature')
+    
+    # Add temperature categories
+    temperature_df['temp_category'] = pd.cut(
+        temperature_df['temperature'],
+        bins=[0, 20, 40, 60, 80, 100],
+        labels=['Very Low', 'Low', 'Medium', 'High', 'Very High']
+    )
+    
+    return temperature_df
+
+def analyze_alerts(alert_df, outage_df):
+    """
+    Perform comprehensive alert analysis and temperature calculation
+    """
+    # Merge alert data with outage data if needed
+    merged_df = pd.merge(
+        alert_df,
+        outage_df,
+        left_on='app_name',
+        right_on='applid',
+        how='left'
+    )
+    
+    # Calculate temperatures for different groupings
+    analysis_results = {
+        'datasource_temp': calculate_alert_temperature(
+            merged_df, ['datasource', 'category']
+        ),
+        'entity_temp': calculate_alert_temperature(
+            merged_df, ['entity_type', 'entity_name']
+        ),
+        'condition_temp': calculate_alert_temperature(
+            merged_df, ['condition_name', 'policy_name']
+        )
+    }
+    
+    return analysis_results
+
 def get_alert_data(engine, lookback_hours=2):
     """Fetch alert data from PostgreSQL with a specified lookback window"""
     query = """
