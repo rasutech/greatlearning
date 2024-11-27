@@ -309,81 +309,69 @@ def feature_engineering(self):
     return self.features_df
 
 def _export_enhanced_summaries(self):
-    """Export detailed summaries with 10-minute granularity analysis"""
-    
-    # 1. Feature Summary with enhanced time analysis
-    with pd.ExcelWriter('feature_summary.xlsx') as writer:
-        # Overall summary
-        feature_summary = pd.DataFrame({
-            'total_windows': len(self.features_df),
-            'outage_windows': len(self.features_df[self.features_df['window_type'] == 'outage']),
-            'normal_windows': len(self.features_df[self.features_df['window_type'] == 'normal']),
-            'total_alerts_processed': self.features_df['alert_count'].sum(),
-            'avg_alerts_per_window': self.features_df['alert_count'].mean(),
-            'max_alerts_in_window': self.features_df['alert_count'].max(),
-            'avg_alert_frequency': self.features_df['alert_frequency'].mean(),
-            'unique_alert_types': self.features_df['unique_alert_types'].max(),
-        }, index=[0])
-        feature_summary.to_excel(writer, sheet_name='Summary', index=False)
-        
-        # Time-based statistics
-        time_stats = self.features_df.groupby([
-            self.features_df['window_end'].dt.date,
-            self.features_df['window_end'].dt.hour,
-            pd.cut(self.features_df['window_end'].dt.minute, bins=range(0, 61, 10))
+    """Export detailed summaries with timezone handling"""
+    try:
+        # Convert datetime columns to timezone-naive format
+        features_for_export = self.features_df.copy()
+        datetime_cols = ['window_start', 'window_end']
+        for col in datetime_cols:
+            if col in features_for_export.columns:
+                features_for_export[col] = features_for_export[col].dt.tz_localize(None)
+
+        # Create time-based statistics with timezone-naive datetimes
+        time_stats = features_for_export.groupby([
+            features_for_export['window_end'].dt.date,
+            features_for_export['window_end'].dt.hour,
+            pd.cut(features_for_export['window_end'].dt.minute, bins=range(0, 61, 10))
         ]).agg({
             'alert_count': ['count', 'sum', 'mean'],
             'is_outage': 'sum',
             'alert_frequency': 'mean'
         }).round(2)
-        time_stats.to_excel(writer, sheet_name='10-Min Intervals')
-        
-        # Hourly patterns
-        hourly_patterns = self.features_df.groupby('hour_of_day').agg({
-            'alert_count': ['mean', 'max'],
-            'is_outage': 'sum',
-            'alert_frequency': 'mean'
-        }).round(2)
-        hourly_patterns.to_excel(writer, sheet_name='Hourly Patterns')
-        
-        # Business hours analysis
-        business_hours = self.features_df.groupby('is_business_hours').agg({
-            'alert_count': ['mean', 'sum'],
-            'is_outage': 'sum',
-            'alert_frequency': 'mean'
-        }).round(2)
-        business_hours.to_excel(writer, sheet_name='Business Hours')
-    
-    # 2. Enhanced Alert Summary
-    with pd.ExcelWriter('alert_summary.xlsx') as writer:
-        # Basic summary
-        alert_summary = pd.DataFrame({
-            'total_alerts': len(self.alerts_df),
-            'unique_apps': self.alerts_df['app_name'].nunique(),
-            'unique_conditions': self.alerts_df['condition_name'].nunique(),
-            'unique_categories': self.alerts_df['category'].nunique(),
-            'date_range': f"{self.alerts_df['alert_start_time'].min()} to {self.alerts_df['alert_start_time'].max()}",
-            'avg_duration': self.alerts_df['duration'].mean(),
-        }, index=[0])
-        alert_summary.to_excel(writer, sheet_name='Summary', index=False)
-        
-        # 10-minute interval analysis
-        alert_intervals = self.alerts_df.set_index('alert_start_time').resample('10T').agg({
-            'app_name': 'count',
-            'category': 'nunique',
-            'condition_name': 'nunique',
-            'duration': 'mean'
-        })
-        alert_intervals.columns = ['alert_count', 'unique_categories', 'unique_conditions', 'avg_duration']
-        alert_intervals.to_excel(writer, sheet_name='10-Min Intervals')
-        
-        # Alert patterns by time
-        time_patterns = self.alerts_df.groupby([
-            self.alerts_df['alert_start_time'].dt.hour,
-            self.alerts_df['alert_start_time'].dt.dayofweek
-        ]).size().unstack()
-        time_patterns.to_excel(writer, sheet_name='Time Patterns')
 
+        with pd.ExcelWriter('feature_summary.xlsx') as writer:
+            # Overall summary
+            feature_summary = pd.DataFrame({
+                'total_windows': len(features_for_export),
+                'outage_windows': len(features_for_export[features_for_export['window_type'] == 'outage']),
+                'normal_windows': len(features_for_export[features_for_export['window_type'] == 'normal']),
+                'total_alerts_processed': features_for_export['alert_count'].sum(),
+                'avg_alerts_per_window': features_for_export['alert_count'].mean(),
+                'max_alerts_in_window': features_for_export['alert_count'].max(),
+                'start_date': features_for_export['window_end'].min(),
+                'end_date': features_for_export['window_end'].max()
+            }, index=[0])
+            
+            feature_summary.to_excel(writer, sheet_name='Summary', index=False)
+            
+            # Time-based statistics
+            time_stats.to_excel(writer, sheet_name='10-Min Intervals')
+            
+            # Hourly patterns
+            hourly_patterns = features_for_export.groupby('hour').agg({
+                'alert_count': ['mean', 'max'],
+                'is_outage': 'sum',
+                'alert_frequency': 'mean'
+            }).round(2)
+            hourly_patterns.to_excel(writer, sheet_name='Hourly Patterns')
+            
+            # Business hours analysis
+            business_hours = features_for_export.groupby('is_business_hours').agg({
+                'alert_count': ['mean', 'sum'],
+                'is_outage': 'sum',
+                'alert_frequency': 'mean'
+            }).round(2)
+            business_hours.to_excel(writer, sheet_name='Business Hours')
+
+            # Feature statistics
+            feature_stats = features_for_export.select_dtypes(include=[np.number]).describe().transpose()
+            feature_stats.to_excel(writer, sheet_name='Feature Statistics')
+
+        logging.info("Enhanced summaries exported successfully")
+        
+    except Exception as e:
+        logging.error(f"Error exporting enhanced summaries: {str(e)}")
+        raise
     def _generate_confusion_matrix(self, y_true, y_pred, model_name):
         """Generate confusion matrix visualization"""
         cm = confusion_matrix(y_true, y_pred)
