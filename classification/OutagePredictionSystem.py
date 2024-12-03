@@ -109,114 +109,166 @@ class OutagePredictionSystem:
         
         return alerts_df, outages_df
 
-def generate_features(self, alerts_df: pd.DataFrame, outages_df: pd.DataFrame) -> pd.DataFrame:
+def _check_outage(self, interval_timestamp: pd.Timestamp, outages_df: pd.DataFrame) -> int:
     """
-    Generate features for the prediction model with robust timestamp handling.
+    Determine if a given timestamp falls within any outage period.
+    
+    This function checks if the provided timestamp falls within any outage windows
+    in the outages DataFrame. It handles timezone-aware comparisons and includes
+    detailed logging for debugging purposes.
     
     Args:
-        alerts_df: DataFrame containing alert data
-        outages_df: DataFrame containing outage data
+        interval_timestamp: The timestamp to check for outages
+        outages_df: DataFrame containing outage records with 'Start' and 'End' columns
         
     Returns:
-        DataFrame containing generated features
+        1 if the timestamp falls within an outage period, 0 otherwise
+    """
+    try:
+        # Ensure the timestamp is timezone-aware
+        if interval_timestamp.tz is None:
+            interval_timestamp = interval_timestamp.tz_localize('UTC')
+            
+        # Check each outage period
+        for _, outage in outages_df.iterrows():
+            # Convert outage timestamps to UTC if they aren't already
+            start = outage['Start']
+            end = outage['End']
+            
+            # Validate the timestamps
+            if pd.isna(start) or pd.isna(end):
+                logger.warning(f"Skipping outage record with invalid timestamps: Start={start}, End={end}")
+                continue
+                
+            # Ensure timestamps are timezone-aware
+            if start.tz is None:
+                start = start.tz_localize('UTC')
+            if end.tz is None:
+                end = end.tz_localize('UTC')
+                
+            # Check if the interval falls within this outage period
+            if start <= interval_timestamp <= end:
+                logger.debug(f"Outage found at {interval_timestamp}")
+                return 1
+                
+        logger.debug(f"No outage found at {interval_timestamp}")
+        return 0
+        
+    except Exception as e:
+        logger.error(f"Error checking outage status: {str(e)}")
+        return 0  # Default to no outage in case of error
+
+def generate_features(self, alerts_df: pd.DataFrame, outages_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Generate features for the prediction model with enhanced error handling and validation.
+    
+    This function creates time-based features from alerts and outages data, including
+    proper handling of the target variable (is_outage).
+    
+    Args:
+        alerts_df: DataFrame containing alert records
+        outages_df: DataFrame containing outage records
+        
+    Returns:
+        DataFrame containing generated features and target variable
     """
     try:
         features_list = []
         
-        # First, let's validate our input data
-        logger.info(f"Alert timestamps range: {alerts_df['alert_start_time'].min()} to {alerts_df['alert_end_time'].max()}")
-        logger.info(f"Outage timestamps range: {outages_df['Start'].min()} to {outages_df['End'].max()}")
+        # Get valid time range
+        start_time = self._get_valid_start_time(alerts_df, outages_df)
+        end_time = self._get_valid_end_time(alerts_df, outages_df)
         
-        # Get valid start time
-        alert_start = alerts_df['alert_start_time'].min()
-        outage_start = outages_df['Start'].min()
+        logger.info(f"Generating features for time range: {start_time} to {end_time}")
         
-        # Get valid end time
-        alert_end = alerts_df['alert_end_time'].max()
-        outage_end = outages_df['End'].max()
-        current_time = pd.Timestamp.now(tz='UTC')
-        
-        # Validate and set start time
-        if pd.isna(alert_start) and pd.isna(outage_start):
-            logger.warning("No valid start times found in either dataset")
-            # Fallback to 24 hours ago
-            start_time = current_time - pd.Timedelta(days=1)
-        else:
-            # Use the earliest valid timestamp
-            valid_starts = [ts for ts in [alert_start, outage_start] if not pd.isna(ts)]
-            start_time = min(valid_starts)
-        
-        # Validate and set end time
-        if pd.isna(alert_end) and pd.isna(outage_end):
-            logger.warning("No valid end times found in either dataset")
-            end_time = current_time
-        else:
-            # Use the latest valid timestamp
-            valid_ends = [ts for ts in [alert_end, outage_end, current_time] if not pd.isna(ts)]
-            end_time = max(valid_ends)
-        
-        logger.info(f"Using time range: {start_time} to {end_time}")
-        
-        # Ensure we have valid timestamps before proceeding
-        if not (isinstance(start_time, pd.Timestamp) and isinstance(end_time, pd.Timestamp)):
-            raise ValueError("Could not establish valid time range for feature generation")
-            
-        # Ensure both timestamps are timezone-aware
-        if start_time.tz is None:
-            start_time = start_time.tz_localize('UTC')
-        if end_time.tz is None:
-            end_time = end_time.tz_localize('UTC')
-            
         # Generate 10-minute intervals
-        intervals = pd.date_range(
-            start=start_time,
-            end=end_time,
-            freq='10T',
-            tz='UTC'
-        )
+        intervals = pd.date_range(start=start_time, end=end_time, freq='10T', tz='UTC')
         
-        logger.info(f"Generated {len(intervals)} intervals for feature extraction")
+        total_intervals = len(intervals)
+        logger.info(f"Processing {total_intervals} intervals")
         
-        for interval_start in intervals:
+        for i, interval_start in enumerate(intervals):
+            if i % 100 == 0:  # Log progress periodically
+                logger.info(f"Processing interval {i+1}/{total_intervals}")
+                
             interval_end = interval_start + pd.Timedelta(minutes=10)
             
-            # Get alerts in this interval with proper timestamp comparison
+            # Get alerts in this interval
             interval_alerts = alerts_df[
                 (alerts_df['alert_start_time'] >= interval_start) &
                 (alerts_df['alert_start_time'] < interval_end)
             ].copy()
             
-            # Only process intervals with alerts
-            if len(interval_alerts) == 0:
-                continue
-                
-            # Calculate features
-            try:
-                features = {
-                    'interval_start': interval_start,
-                    'alert_temperature': self._calculate_alert_temperature(interval_alerts),
-                    'alert_density': self._calculate_alert_density(interval_alerts),
-                    'peak_hour': 1 if self._is_peak_hour(interval_start) else 0,
-                    'day_of_week': interval_start.dayofweek,
-                    'alert_duration': self._calculate_weighted_duration(interval_alerts),
-                    'is_outage': self._check_outage(interval_start, outages_df)
-                }
-                features_list.append(features)
-            except Exception as e:
-                logger.error(f"Error calculating features for interval {interval_start}: {str(e)}")
-                continue
+            # Only create features for intervals with alerts or outages
+            is_outage = self._check_outage(interval_start, outages_df)
+            
+            if len(interval_alerts) > 0 or is_outage:
+                try:
+                    features = {
+                        'interval_start': interval_start,
+                        'alert_temperature': self._calculate_alert_temperature(interval_alerts) if len(interval_alerts) > 0 else 0,
+                        'alert_density': self._calculate_alert_density(interval_alerts) if len(interval_alerts) > 0 else 0,
+                        'peak_hour': 1 if self._is_peak_hour(interval_start) else 0,
+                        'day_of_week': interval_start.dayofweek,
+                        'alert_duration': self._calculate_weighted_duration(interval_alerts) if len(interval_alerts) > 0 else 0,
+                        'is_outage': is_outage  # Explicitly include the target variable
+                    }
+                    features_list.append(features)
+                except Exception as e:
+                    logger.error(f"Error calculating features for interval {interval_start}: {str(e)}")
+                    continue
         
         if not features_list:
             logger.warning("No features were generated. Check if your data contains valid intervals.")
             return pd.DataFrame()
+        
+        # Create the features DataFrame
+        features_df = pd.DataFrame(features_list)
+        
+        # Validate the presence of required columns
+        required_columns = ['interval_start', 'alert_temperature', 'alert_density', 
+                          'peak_hour', 'day_of_week', 'alert_duration', 'is_outage']
+        missing_columns = [col for col in required_columns if col not in features_df.columns]
+        
+        if missing_columns:
+            raise ValueError(f"Missing required columns in features DataFrame: {missing_columns}")
             
-        logger.info(f"Successfully generated features for {len(features_list)} intervals")
-        return pd.DataFrame(features_list)
+        logger.info(f"Successfully generated features for {len(features_df)} intervals")
+        logger.info(f"Outage distribution: {features_df['is_outage'].value_counts().to_dict()}")
+        
+        return features_df
         
     except Exception as e:
         logger.error(f"Error in feature generation: {str(e)}")
         raise
-      
+
+def _get_valid_start_time(self, alerts_df: pd.DataFrame, outages_df: pd.DataFrame) -> pd.Timestamp:
+    """Helper method to determine valid start time for feature generation."""
+    alert_start = alerts_df['alert_start_time'].min()
+    outage_start = outages_df['Start'].min()
+    current_time = pd.Timestamp.now(tz='UTC')
+    
+    valid_starts = [ts for ts in [alert_start, outage_start] 
+                   if not pd.isna(ts)]
+    
+    if not valid_starts:
+        return current_time - pd.Timedelta(days=1)
+    
+    start_time = min(valid_starts)
+    return start_time if start_time.tz else start_time.tz_localize('UTC')
+
+def _get_valid_end_time(self, alerts_df: pd.DataFrame, outages_df: pd.DataFrame) -> pd.Timestamp:
+    """Helper method to determine valid end time for feature generation."""
+    alert_end = alerts_df['alert_end_time'].max()
+    outage_end = outages_df['End'].max()
+    current_time = pd.Timestamp.now(tz='UTC')
+    
+    valid_ends = [ts for ts in [alert_end, outage_end, current_time] 
+                 if not pd.isna(ts)]
+    
+    end_time = max(valid_ends)
+    return end_time if end_time.tz else end_time.tz_localize('UTC')
+  
     def _calculate_alert_temperature(self, alerts: pd.DataFrame) -> float:
         """Calculate weighted average alert score."""
         if len(alerts) == 0:
