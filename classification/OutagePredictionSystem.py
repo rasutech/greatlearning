@@ -253,31 +253,131 @@ def generate_features(self, alerts_df: pd.DataFrame, outages_df: pd.DataFrame) -
                 return 1
         return 0
 
-    def train_models(self, features_df: pd.DataFrame) -> Tuple[Dict, Dict]:
-        """Train both versions of the Random Forest model."""
-        X = features_df.drop(['interval_start', 'is_outage'], axis=1)
-        y = features_df['is_outage']
+def train_models(self, features_df: pd.DataFrame) -> Tuple[Dict, Dict]:
+    """
+    Train both versions of the Random Forest model with proper feature handling.
+    
+    Args:
+        features_df: DataFrame containing the generated features and target variable
         
+    Returns:
+        Tuple of dictionaries containing metrics for both model versions
+    """
+    logger.info("Starting model training process")
+    
+    try:
+        # First, let's identify our feature columns and target variable
+        # We'll exclude metadata columns and the target variable from our features
+        metadata_columns = ['interval_start']  # Columns not used for prediction
+        target_column = 'is_outage'
+        
+        # Get all feature columns by excluding metadata and target
+        feature_columns = [col for col in features_df.columns 
+                         if col not in metadata_columns + [target_column]]
+        
+        logger.info(f"Using the following features for training: {feature_columns}")
+        
+        # Prepare feature matrix X and target vector y
+        X = features_df[feature_columns]
+        y = features_df[target_column]
+        
+        # Perform train-test split
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
+            X, y, test_size=0.2, random_state=42, stratify=y
         )
         
+        logger.info(f"Training set size: {len(X_train)}, Test set size: {len(X_test)}")
+        
         # Version 1: Without SMOTE
-        model_v1 = RandomForestClassifier(n_estimators=100, random_state=42)
+        logger.info("Training Version 1 (without SMOTE)...")
+        model_v1 = RandomForestClassifier(
+            n_estimators=100,
+            random_state=42,
+            class_weight='balanced'  # Handle class imbalance
+        )
         model_v1.fit(X_train, y_train)
         metrics_v1 = self._calculate_metrics(model_v1, X_test, y_test, "Version 1")
         
         # Version 2: With SMOTE
+        logger.info("Training Version 2 (with SMOTE)...")
         smote = SMOTE(random_state=42)
         X_train_smote, y_train_smote = smote.fit_resample(X_train, y_train)
-        model_v2 = RandomForestClassifier(n_estimators=100, random_state=42)
+        
+        logger.info(f"SMOTE-resampled training set size: {len(X_train_smote)}")
+        
+        model_v2 = RandomForestClassifier(
+            n_estimators=100,
+            random_state=42
+        )
         model_v2.fit(X_train_smote, y_train_smote)
         metrics_v2 = self._calculate_metrics(model_v2, X_test, y_test, "Version 2")
+        
+        # Save feature importance information
+        self._save_feature_importance(model_v1, feature_columns, 'v1')
+        self._save_feature_importance(model_v2, feature_columns, 'v2')
         
         # Save models
         self._save_models(model_v1, model_v2)
         
+        logger.info("Model training completed successfully")
         return metrics_v1, metrics_v2
+        
+    except Exception as e:
+        logger.error(f"Error in model training: {str(e)}")
+        raise
+
+def _save_feature_importance(self, model: RandomForestClassifier, 
+                           feature_names: List[str], version: str):
+    """
+    Save feature importance information for analysis.
+    
+    Args:
+        model: Trained RandomForestClassifier model
+        feature_names: List of feature names
+        version: Model version identifier
+    """
+    try:
+        # Get feature importances
+        importances = model.feature_importances_
+        indices = np.argsort(importances)[::-1]
+        
+        # Create a DataFrame with feature importances
+        importance_df = pd.DataFrame({
+            'feature': [feature_names[i] for i in indices],
+            'importance': importances[indices]
+        })
+        
+        # Save to CSV
+        importance_df.to_csv(f'feature_importance_v{version}.csv', index=False)
+        logger.info(f"Saved feature importance information for version {version}")
+        
+    except Exception as e:
+        logger.error(f"Error saving feature importance: {str(e)}")
+
+def _save_models(self, model_v1: RandomForestClassifier, 
+                model_v2: RandomForestClassifier):
+    """
+    Save trained models to disk with proper error handling.
+    
+    Args:
+        model_v1: First version of the trained model
+        model_v2: Second version of the trained model (with SMOTE)
+    """
+    try:
+        # Save models with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        with open(f'model_v1_{timestamp}.pkl', 'wb') as f:
+            pickle.dump(model_v1, f)
+        
+        with open(f'model_v2_{timestamp}.pkl', 'wb') as f:
+            pickle.dump(model_v2, f)
+            
+        logger.info(f"Models saved successfully with timestamp {timestamp}")
+        
+    except Exception as e:
+        logger.error(f"Error saving models: {str(e)}")
+        raise
 
     def _calculate_metrics(self, model, X_test, y_test, version: str) -> Dict:
         """Calculate and return all model metrics."""
@@ -296,13 +396,6 @@ def generate_features(self, alerts_df: pd.DataFrame, outages_df: pd.DataFrame) -
             'classification_report': class_report,
             'roc_curve': (fpr, tpr, roc_auc)
         }
-
-    def _save_models(self, model_v1, model_v2):
-        """Save trained models to disk."""
-        with open('model_v1.pkl', 'wb') as f:
-            pickle.dump(model_v1, f)
-        with open('model_v2.pkl', 'wb') as f:
-            pickle.dump(model_v2, f)
 
     def generate_report(self, metrics_v1: Dict, metrics_v2: Dict):
         """Generate HTML report with all metrics and visualizations."""
