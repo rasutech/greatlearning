@@ -111,11 +111,11 @@ class OutagePredictionSystem:
 
 def _check_outage(self, interval_timestamp: pd.Timestamp, outages_df: pd.DataFrame) -> int:
     """
-    Determine if a given timestamp falls within any outage period.
+    Determine if a given timestamp falls within any outage period, with robust error handling.
     
-    This function checks if the provided timestamp falls within any outage windows
-    in the outages DataFrame. It handles timezone-aware comparisons and includes
-    detailed logging for debugging purposes.
+    This function implements careful validation and conversion of timestamps before comparing
+    them, ensuring that we don't encounter NoneType comparison errors. Each timestamp is 
+    verified and standardized before use.
     
     Args:
         interval_timestamp: The timestamp to check for outages
@@ -125,38 +125,78 @@ def _check_outage(self, interval_timestamp: pd.Timestamp, outages_df: pd.DataFra
         1 if the timestamp falls within an outage period, 0 otherwise
     """
     try:
-        # Ensure the timestamp is timezone-aware
+        # First, validate the input timestamp
+        if not isinstance(interval_timestamp, pd.Timestamp):
+            logger.error(f"Invalid interval timestamp type: {type(interval_timestamp)}")
+            return 0
+            
+        # Ensure the interval timestamp is timezone-aware
         if interval_timestamp.tz is None:
             interval_timestamp = interval_timestamp.tz_localize('UTC')
             
-        # Check each outage period
-        for _, outage in outages_df.iterrows():
-            # Convert outage timestamps to UTC if they aren't already
-            start = outage['Start']
-            end = outage['End']
+        # Log the timestamp we're checking
+        logger.debug(f"Checking for outages at: {interval_timestamp}")
+        
+        # Create a standardized timestamp converter
+        def standardize_timestamp(ts) -> Optional[pd.Timestamp]:
+            """Convert and validate a timestamp value."""
+            try:
+                if pd.isna(ts):
+                    return None
+                    
+                # Convert to pandas timestamp if it isn't already
+                if not isinstance(ts, pd.Timestamp):
+                    ts = pd.to_datetime(ts)
+                    
+                # Add timezone if needed
+                if ts.tz is None:
+                    ts = ts.tz_localize('UTC')
+                else:
+                    ts = ts.tz_convert('UTC')
+                    
+                return ts
+                
+            except Exception as e:
+                logger.error(f"Error converting timestamp {ts}: {str(e)}")
+                return None
+        
+        # Check each outage period with careful validation
+        for idx, outage in outages_df.iterrows():
+            # Convert and validate both timestamps
+            start_time = standardize_timestamp(outage['Start'])
+            end_time = standardize_timestamp(outage['End'])
             
-            # Validate the timestamps
-            if pd.isna(start) or pd.isna(end):
-                logger.warning(f"Skipping outage record with invalid timestamps: Start={start}, End={end}")
+            # Skip invalid outage records
+            if start_time is None or end_time is None:
+                logger.warning(
+                    f"Skipping outage record {idx} due to invalid timestamps: "
+                    f"Start={outage['Start']}, End={outage['End']}"
+                )
                 continue
                 
-            # Ensure timestamps are timezone-aware
-            if start.tz is None:
-                start = start.tz_localize('UTC')
-            if end.tz is None:
-                end = end.tz_localize('UTC')
+            # Verify the outage period is valid (start before end)
+            if start_time > end_time:
+                logger.warning(
+                    f"Skipping outage record {idx} with invalid period: "
+                    f"start ({start_time}) is after end ({end_time})"
+                )
+                continue
                 
-            # Check if the interval falls within this outage period
-            if start <= interval_timestamp <= end:
-                logger.debug(f"Outage found at {interval_timestamp}")
+            # Now we can safely compare timestamps
+            if start_time <= interval_timestamp <= end_time:
+                logger.debug(
+                    f"Found outage at {interval_timestamp} "
+                    f"(between {start_time} and {end_time})"
+                )
                 return 1
-                
+        
+        # If we get here, no outage was found
         logger.debug(f"No outage found at {interval_timestamp}")
         return 0
         
     except Exception as e:
-        logger.error(f"Error checking outage status: {str(e)}")
-        return 0  # Default to no outage in case of error
+        logger.error(f"Error in outage checking: {str(e)}")
+        return 0
 
 def generate_features(self, alerts_df: pd.DataFrame, outages_df: pd.DataFrame) -> pd.DataFrame:
     """
